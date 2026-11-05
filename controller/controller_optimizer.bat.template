@@ -1,0 +1,29 @@
+@echo off
+title DS4 Hyper-Velocity Background Optimizer
+cd /d "%~dp0"
+
+:: Maximize strafe speed and enforce system optimizations with custom anti-overshoot tracking balance with hyper ultra fast strafe tracking speed bursted for omnipotent maximum tracking on strafing lightening speed that is snappy with control over stick matches aim assist behaviour highest system performance with Hyper-Velocity Strafe Boost (Anti-DZ X: 16%, Max Zone X: 40%) zero input delay on aim assist bubble while maintaining magnetic aim feeling on target with maximum strength control and friction lock on target with light-speed micro tracking responsiveness so no strafer can escape
+
+:: Exit quietly if the optimizer is already running (avoids hidden duplicates)
+powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*ds4_optimize_final.py*' }) { exit 1 }"
+if errorlevel 1 exit /b
+
+:: Your DS4Windows profile path (edit here if it ever moves)
+set "PROFILE=@@PROFILE@@"
+
+:: Start DS4Windows if it isn't running yet, so there is something to boost
+tasklist /FI "IMAGENAME eq DS4Windows.exe" | find /I "DS4Windows.exe" >nul
+if errorlevel 1 (
+    if exist "@@DS4EXE@@" (
+        start "" "@@DS4EXE@@"
+    )
+)
+
+:: Output goes to a log since the window is hidden: ds4_optimizer.log (same folder as this file)
+:: Try 'python' first, fall back to the 'py' launcher if needed.
+python --version >nul 2>&1
+if errorlevel 1 (
+    py -3 -u "%~dp0ds4_optimize_final.py" --profile "%PROFILE%" --strafe-boost @@STRAFE@@ > "%~dp0ds4_optimizer.log" 2>&1
+) else (
+    python -u "%~dp0ds4_optimize_final.py" --profile "%PROFILE%" --strafe-boost @@STRAFE@@ > "%~dp0ds4_optimizer.log" 2>&1
+)
