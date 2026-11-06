@@ -72,16 +72,16 @@ There is one profile: maximum. Each group can be switched off in `C:\ProgramData
 - **Power plan:** its own plan ("Kpekpes COD Custom Max"), 100% min/max processor state, aggressive boost,
   performance energy preference, USB/PCIe power saving off, hibernate and fast startup off.
 - **Game Mode off**, Game Bar and Game DVR off, MPO off, Auto HDR off, hardware GPU scheduling on.
-- **Timer:** 0.5 ms resolution held by a small background task, platform tick on, dynamic tick off.
+- **Timer:** 0.5 ms resolution held by a small background task, dynamic tick off. (Platform tick is opt-in: `UsePlatformTick`.)
 - **Network:** Nagle off, TCP tuned, wired-adapter power saving, interrupt moderation and flow control off, QoS tag for `cod.exe`.
 - **Services:** SysMain, DiagTrack, Windows Search and a few more disabled.
 - **Windows Update control:** no driver updates from Windows Update, no auto-reboot while you are logged in, no Store auto-download.
-- **Xbox apps removed**, Copilot / widgets / suggestions / notifications off.
-- **Memory integrity and VBS off.**
+- **Xbox apps removed**, Copilot / widgets / suggestions off. (Toast notifications off is opt-in: `DisableToastNotifications`, because it can hide Windows Security alerts.)
+- **Memory integrity / VBS / hypervisor off: opt-in only** (`HvciOff`, default false). Back up your BitLocker recovery key before turning it on.
 - **Game process:** High CPU and I/O priority entries for the game and DS4Windows, high-performance GPU preference, fullscreen optimizations off.
 - **Defender exclusions for exact paths** (the game, Battle.net, DS4Windows). Not bare file names.
 - **Logon re-apply:** re-applies the PC tweaks at every logon, since Windows updates can undo them.
-  Create an empty file named `PAUSE` in `C:\ProgramData\KpekpesCODCustom` to skip it.
+  Create an empty file named `PAUSE` in `C:\ProgramData\KpekpesCODCustom` to skip it. By default it leaves your mouse / visual / input choices alone (`ReapplyUserPreferences`: false).
 
 The GPU driver's own registry key is not written to.
 
@@ -95,9 +95,8 @@ maximum performance**. A script cannot read back or undo per-app driver profiles
 - **Some tweaks are applied but give no FPS.** The MMCSS "Games" values, `NetworkThrottlingIndex`,
   `SystemResponsiveness`, `Win32PrioritySeparation` (2 is the Windows default) and the Nagle/TCP values (Call
   of Duty uses UDP) are marked "no FPS gain expected" in the report. They are harmless. Measure for yourself with the frame comparison below.
-- **What lowers security:** memory integrity / VBS off, Defender exclusions, and driver updates blocked in
-  Windows Update. Secure Boot, TPM, UAC and Defender real-time protection are not touched.
-- **Memory integrity off also turns the hypervisor launch off**, which stops WSL2, Hyper-V, Docker and Windows Sandbox. Undo restores it.
+- **What lowers security:** Defender exclusions and driver updates blocked in Windows Update (plus memory integrity / VBS off, only if you opt in). Secure Boot, TPM, UAC and Defender real-time protection are not touched.
+- **If you opt in to `HvciOff`**, the hypervisor launch is also turned off, which stops WSL2, Hyper-V, Docker and Windows Sandbox. Undo restores it.
 - Windows Search is disabled, so Start-menu search is limited.
 - Install your GPU, chipset and network drivers **before** using the Windows Update driver block, then update drivers by hand.
 
@@ -116,7 +115,12 @@ Wraps the DS4Windows optimizer script in `controller\`. It needs **Python 3** (t
 - Raises DS4Windows to High priority, turns off power throttling for it, and holds the timer at its finest resolution.
 - Verify checks: one optimizer running, DS4Windows priority, tuned profile values, task registered and elevated.
 
-Change the level in `config.json`: `"StrafeBoost": "mild" | "strong" | "max"`.
+Settings in `config.json` under `Controller`:
+
+- `"StrafeBoost": "mild" | "strong" | "max"`
+- `"KeepAwake": "games" | "always" | "never"` - `games` (default) holds the PC awake only while cod.exe is running; `always` is the old behaviour.
+- `"TunedProfilePolicy": "preserve-edits" | "overwrite"` - `preserve-edits` (default) never overwrites a `_tuned.xml` you edited; `overwrite` is the old behaviour.
+- `"AllowUserWritablePython": false` - the elevated task refuses a Python that normal users can edit. Install one for all users: `winget install -e --id Python.Python.3.12 --scope machine`.
 
 ---
 
@@ -139,6 +143,8 @@ Change the level in `config.json`: `"StrafeBoost": "mild" | "strong" | "max"`.
 | `modules\Pc.ps1`, `modules\Controller.ps1` | The two modules |
 | `controller\` | DS4 optimizer script, launcher templates, default profile |
 | `tests\Test-Logic.ps1` | Tests for the logic that does not need Windows (`pwsh tests/Test-Logic.ps1`) |
+| `tests\Test-Roundtrip.ps1` | Real-Windows round trip (GitHub Actions only): snapshot, optimize, undo, compare |
+| `.github\workflows\windows-test.yml` | The GitHub Actions test |
 
 ## Disclaimer
 

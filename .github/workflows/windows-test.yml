@@ -1,0 +1,53 @@
+name: windows-test
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: powershell   # Windows PowerShell 5.1, the same one the tool uses
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 0. Find the project (folders in the repo, or the zip uploaded as one file)
+        run: |
+          $root = '.'
+          if (-not (Test-Path '.\tests\Test-Logic.ps1')) {
+            $zip = Get-ChildItem -Path . -Filter *.zip -File | Where-Object { $_.Name -match 'Kpekpes' } | Select-Object -First 1
+            if (-not $zip) { Write-Host 'No tests\Test-Logic.ps1 and no Kpekpes zip at the top of the repo. Upload the zip file itself.'; exit 1 }
+            Expand-Archive -LiteralPath $zip.FullName -DestinationPath .\pkg -Force
+            $hit = Get-ChildItem -Path .\pkg -Recurse -Filter Kpekpes.ps1 | Select-Object -First 1
+            if (-not $hit) { Write-Host 'Kpekpes.ps1 not found inside the zip'; exit 1 }
+            $root = $hit.DirectoryName
+          }
+          Write-Host ('project folder: ' + $root)
+          Get-ChildItem -Path $root | ForEach-Object { Write-Host ('  ' + $_.Name) }
+          "KROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 1. Syntax check every .ps1
+        working-directory: ${{ env.KROOT }}
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $errs = $null; $tok = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tok, [ref]$errs) | Out-Null
+            if ($errs.Count -gt 0) { $bad++; Write-Host ('PARSE ERROR ' + $_.FullName); $errs | ForEach-Object { Write-Host ('  ' + $_.Message + ' line ' + $_.Extent.StartLineNumber) } }
+            else { Write-Host ('parse ok  ' + $_.FullName) }
+          }
+          if ($bad -gt 0) { exit 1 }
+
+      - name: 2. Logic tests (no Windows changes)
+        timeout-minutes: 5
+        working-directory: ${{ env.KROOT }}
+        run: .\tests\Test-Logic.ps1
+
+      - name: 3. Round trip on this machine (Safe + Full), then compare
+        timeout-minutes: 8
+        working-directory: ${{ env.KROOT }}
+        run: .\tests\Test-Roundtrip.ps1 -Scenario Both

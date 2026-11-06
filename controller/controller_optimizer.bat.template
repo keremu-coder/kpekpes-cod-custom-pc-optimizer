@@ -20,10 +20,5 @@ if errorlevel 1 (
 )
 
 :: Output goes to a log since the window is hidden: ds4_optimizer.log (same folder as this file)
-:: Try 'python' first, fall back to the 'py' launcher if needed.
-python --version >nul 2>&1
-if errorlevel 1 (
-    py -3 -u "%~dp0ds4_optimize_final.py" --profile "%PROFILE%" --strafe-boost @@STRAFE@@ > "%~dp0ds4_optimizer.log" 2>&1
-) else (
-    python -u "%~dp0ds4_optimize_final.py" --profile "%PROFILE%" --strafe-boost @@STRAFE@@ > "%~dp0ds4_optimizer.log" 2>&1
-)
+:: The interpreter is the full path found at install time (never looked up through PATH).
+"@@PYTHON@@" -u "%~dp0ds4_optimize_final.py" --profile "%PROFILE%" --strafe-boost @@STRAFE@@ --keep-awake @@KEEPAWAKE@@ --tuned-policy @@TUNEDPOLICY@@ > "%~dp0ds4_optimizer.log" 2>&1

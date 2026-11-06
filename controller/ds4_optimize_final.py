@@ -6,7 +6,7 @@ While this runs:
   * Windows timer set to its finest resolution (~0.5 ms)  <- the smooth feel
   * DS4Windows raised to HIGH priority
   * Windows power-throttling (EcoQoS) disabled for DS4Windows
-  * PC kept awake (no sleep while gaming)
+  * PC kept awake (--keep-awake always|games|never; default always)
 Close the window / Ctrl+C and everything returns to normal.
 
 Profile:
@@ -20,6 +20,7 @@ Usage:
 """
 import argparse
 import ctypes
+import hashlib
 import os
 import subprocess
 import sys
@@ -28,6 +29,9 @@ import xml.etree.ElementTree as ET
 
 IS_WIN = os.name == "nt"
 PROCS = ["DS4Windows.exe"]
+# --keep-awake games: the PC is only held awake while one of these is running
+GAME_EXES = ["cod.exe", "cod24.exe", "cod23.exe", "ModernWarfare.exe"]
+TUNED_SIDECAR = ".kpekpes-sha256"   # remembers the hash of the _tuned.xml this script wrote
 
 # Left-stick X (strafe) levels: (anti-deadzone %, max zone %)
 STRAFE_LEVELS = {"mild": (6, 52), "strong": (10, 48), "max": (16, 40)}
@@ -92,6 +96,19 @@ def find_pids(name):
             except ValueError:
                 continue
     return pids
+
+def any_running(names):
+    """True if any of the given image names is running (one tasklist call)."""
+    try:
+        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return False
+    low = {n.lower() for n in names}
+    for line in out.splitlines():
+        parts = [p.strip('"') for p in line.split('","')]
+        if parts and parts[0].lower() in low:
+            return True
+    return False
 
 def boost_process(pid):
     try:
@@ -161,6 +178,24 @@ def _set(parent, tag, value):
     el.text = str(value)
     return old
 
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def tuned_was_edited(out):
+    """True if <out> exists and is not exactly what this script wrote last time (or we cannot tell)."""
+    if not os.path.isfile(out):
+        return False
+    side = out + TUNED_SIDECAR
+    try:
+        with open(side, "r", encoding="ascii") as f:
+            return f.read().strip().lower() != _sha256(out)
+    except OSError:
+        return True   # no record of writing it -> treat it as the user's file
+
 def write_tuned(path, args):
     try:
         tree = ET.parse(path)
@@ -206,8 +241,15 @@ def write_tuned(path, args):
     if base.endswith("_tuned"):
         base = base[: -len("_tuned")]   # never produce _tuned_tuned.xml
     out = f"{base}_tuned{ext}"
+    policy = getattr(args, "tuned_policy", "overwrite")
+    if policy == "preserve-edits" and tuned_was_edited(out):
+        print(f"\nKept your edited tuned profile (not overwritten): {out}")
+        return
     try:
         tree.write(out, encoding="utf-8", xml_declaration=True)
+        if policy == "preserve-edits":
+            with open(out + TUNED_SIDECAR, "w", encoding="ascii") as f:
+                f.write(_sha256(out))
     except OSError as e:
         print(f"\nCould not save tuned copy: {e}")
         return
@@ -225,6 +267,10 @@ def main():
     ap.add_argument("--strafe-boost", choices=list(STRAFE_LEVELS),
                     help="faster left/right strafe response (writes a copy)")
     ap.add_argument("--game", action="append", default=[], help="game .exe to boost too, e.g. --game cod.exe")
+    ap.add_argument("--keep-awake", choices=["always", "games", "never"], default="always",
+                    help="when to hold the PC/monitor awake (default: always, as before)")
+    ap.add_argument("--tuned-policy", choices=["overwrite", "preserve-edits"], default="overwrite",
+                    help="preserve-edits: never overwrite a _tuned.xml you changed (default: overwrite, as before)")
     args = ap.parse_args()
 
     if args.profile:
@@ -243,7 +289,8 @@ def main():
         print("      Use the launcher (ds4_launch_final.bat), it asks for admin for you.")
 
     res = set_timer_resolution()
-    keep_awake(True)
+    awake = (args.keep_awake == "always")
+    keep_awake(awake)
     print(f"\nTimer resolution: {res:.2f} ms" if res else "\nTimer resolution: unchanged")
     targets = PROCS + args.game
     boosted = set()
@@ -255,6 +302,12 @@ def main():
                     if pid not in boosted:
                         print(("Boosted " if boost_process(pid) else "Could not boost (run as admin?) ") + f"{name} [{pid}]", flush=True)
                         boosted.add(pid)
+            if args.keep_awake == "games":
+                want = any_running(GAME_EXES)
+                if want != awake:
+                    awake = want
+                    keep_awake(awake)
+                    print("Game running - holding PC awake." if awake else "No game running - sleep allowed again.", flush=True)
             time.sleep(5)
     except KeyboardInterrupt:
         pass

@@ -76,7 +76,13 @@ Initialize-KRoot | Out-Null
 Set-Content -LiteralPath $script:ConfigPath -Value '{ "DefenderExclusions": false, "Controller": { "StrafeBoost": "strong" } }' -Encoding UTF8
 $c = Get-KConfig
 Assert-That 'overridden switch is read' ($c.DefenderExclusions -eq $false)
-Assert-That 'missing switches keep defaults' ($c.HvciOff -eq $true -and $c.LogonReapply -eq $true)
+Assert-That 'missing switches keep defaults' ($c.LogonReapply -eq $true -and $c.DisableServices -eq $true)
+Assert-That 'risky switches are OFF by default' ($c.HvciOff -eq $false -and $c.DisableToastNotifications -eq $false -and $c.UsePlatformTick -eq $false -and $c.ReapplyUserPreferences -eq $false)
+Assert-That 'controller safe defaults' ($c.Controller.KeepAwake -eq 'games' -and $c.Controller.TunedProfilePolicy -eq 'preserve-edits' -and $c.Controller.AllowUserWritablePython -eq $false)
+Set-Content -LiteralPath $script:ConfigPath -Value '{ "Controller": { "KeepAwake": "bogus", "TunedProfilePolicy": "nope" } }' -Encoding UTF8
+$cb = Get-KConfig
+Assert-That 'invalid choice values fall back to safe defaults' ($cb.Controller.KeepAwake -eq 'games' -and $cb.Controller.TunedProfilePolicy -eq 'preserve-edits')
+Set-Content -LiteralPath $script:ConfigPath -Value '{ "DefenderExclusions": false, "Controller": { "StrafeBoost": "strong" } }' -Encoding UTF8
 Assert-That 'nested value overridden' ($c.Controller.StrafeBoost -eq 'strong')
 Assert-That 'nested defaults kept' ($c.Controller.ProfileName -eq 'EUPHO')
 Remove-Item -LiteralPath $script:ConfigPath -Force
@@ -130,31 +136,107 @@ $restored = [IO.File]::ReadAllBytes($prof)
 Assert-That 'file is byte-identical after set + restore' (([BitConverter]::ToString($orig)) -eq ([BitConverter]::ToString($restored)))
 Assert-That 'missing tag returns false (no crash)' (-not (Set-XmlTagText $prof 'NoSuchTag' 'x'))
 
-Write-Host 'Bundled profile and tuned copy'
+Write-Host 'Bundled profile and tuned copy (never runs the endless optimizer loop)'
 $py = $null
 foreach ($n in @('python3', 'python')) { if (-not $py -and (Get-Command $n -ErrorAction SilentlyContinue)) { $py = $n } }
+# Runs a python helper with a hard time limit. Returns @{ ExitCode; Output; TimedOut }.
+function Invoke-PyHelper {
+    param([string]$Python, [string]$HelperPath, [string[]]$HelperArgs, [int]$TimeoutSec = 30)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = (Get-Command $Python).Source
+    $q = @(); foreach ($x in (@($HelperPath) + $HelperArgs)) { $q += ('"' + $x + '"') }
+    $psi.Arguments = ($q -join ' ')
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $outTask = $p.StandardOutput.ReadToEndAsync(); $errTask = $p.StandardError.ReadToEndAsync()
+    $done = $p.WaitForExit($TimeoutSec * 1000)
+    if (-not $done) { try { $p.Kill() } catch { } ; return @{ ExitCode = -1; Output = ''; TimedOut = $true } }
+    $p.WaitForExit()
+    return @{ ExitCode = $p.ExitCode; Output = ($outTask.Result + $errTask.Result); TimedOut = $false }
+}
 if ($py) {
     $work = Join-Path $tmp 'tuned'; New-Item -ItemType Directory -Path $work | Out-Null
     Copy-Item -LiteralPath (Join-Path $repo 'controller\profiles\EUPHO.xml') -Destination (Join-Path $work 'EUPHO.xml')
-    & $py (Join-Path $repo 'controller\ds4_optimize_final.py') --profile (Join-Path $work 'EUPHO.xml') --strafe-boost max | Out-Null
+    # helper: import the optimizer as a module and call write_tuned only (main() / the watch loop is never started)
+    $helper = Join-Path $tmp 'tuned_helper.py'
+    $helperSrc = @'
+import argparse, importlib.util, sys
+spec = importlib.util.spec_from_file_location("ds4opt", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+profile, strafe, policy = sys.argv[2], sys.argv[3], sys.argv[4]
+a = argparse.Namespace(rs_deadzone=None, rs_antideadzone=None, rs_maxzone=None, ls_deadzone=None,
+                       strafe_boost=strafe, tuned_policy=policy)
+m.write_tuned(profile, a)
+'@
+    [IO.File]::WriteAllText($helper, $helperSrc, (New-Object Text.UTF8Encoding($false)))
+    $optPy = Join-Path $repo 'controller\ds4_optimize_final.py'
+    $profPath = Join-Path $work 'EUPHO.xml'
+    $r1 = Invoke-PyHelper $py $helper @($optPy, $profPath, 'max', 'overwrite') 30
+    Assert-That 'helper finished (no hang)' (-not $r1.TimedOut) 'timed out'
     $tuned = Join-Path $work 'EUPHO_tuned.xml'
     Assert-That 'tuned copy is written' (Test-Path -LiteralPath $tuned)
     $x = [xml](Get-Content -LiteralPath $tuned -Raw)
     $ax = $x.SelectSingleNode('//LSAxialDeadOptions')
     Assert-That 'strafe boost max = 16 / 40 on LS X' ([int]$ax.AntiDeadZoneX -eq 16 -and [int]$ax.MaxZoneX -eq 40)
-    $o = [xml](Get-Content -LiteralPath (Join-Path $work 'EUPHO.xml') -Raw)
+    $o = [xml](Get-Content -LiteralPath $profPath -Raw)
     Assert-That 'right stick curve untouched' ($x.SelectSingleNode('//RSOutputCurveCustom').InnerText -eq $o.SelectSingleNode('//RSOutputCurveCustom').InnerText)
     Assert-That 'right stick dead zones untouched' ($x.SelectSingleNode('//RSAntiDeadZone').InnerText -eq $o.SelectSingleNode('//RSAntiDeadZone').InnerText)
     Assert-That 'left stick curve untouched' ($x.SelectSingleNode('//LSOutputCurveCustom').InnerText -eq $o.SelectSingleNode('//LSOutputCurveCustom').InnerText)
-    Assert-That 'original profile not modified' ((Get-FileHash (Join-Path $work 'EUPHO.xml')).Hash -eq (Get-FileHash (Join-Path $repo 'controller\profiles\EUPHO.xml')).Hash)
+    Assert-That 'original profile not modified' ((Get-FileHash $profPath).Hash -eq (Get-FileHash (Join-Path $repo 'controller\profiles\EUPHO.xml')).Hash)
+    Assert-That 'overwrite policy writes no sidecar' (-not (Test-Path -LiteralPath ($tuned + '.kpekpes-sha256')))
+
+    # preserve-edits policy
+    Remove-Item -LiteralPath $tuned -Force
+    [void](Invoke-PyHelper $py $helper @($optPy, $profPath, 'max', 'preserve-edits') 30)
+    $side = $tuned + '.kpekpes-sha256'
+    Assert-That 'preserve-edits writes tuned copy + sidecar hash' ((Test-Path -LiteralPath $tuned) -and (Test-Path -LiteralPath $side))
+    Assert-That 'sidecar holds the file hash' ((Get-Content -LiteralPath $side -Raw).Trim().ToLower() -eq (Get-FileHash -LiteralPath $tuned -Algorithm SHA256).Hash.ToLower())
+    $h1 = (Get-FileHash -LiteralPath $tuned).Hash
+    [void](Invoke-PyHelper $py $helper @($optPy, $profPath, 'strong', 'preserve-edits') 30)
+    $ax2 = ([xml](Get-Content -LiteralPath $tuned -Raw)).SelectSingleNode('//LSAxialDeadOptions')
+    Assert-That 'untouched generated file IS regenerated (strong = 10 / 48)' ([int]$ax2.AntiDeadZoneX -eq 10 -and [int]$ax2.MaxZoneX -eq 48)
+    # the user edits it
+    $edited = (Get-Content -LiteralPath $tuned -Raw).Replace('<LSAxialDeadOptions>', '<!-- my edit --><LSAxialDeadOptions>')
+    [IO.File]::WriteAllText($tuned, $edited, (New-Object Text.UTF8Encoding($false)))
+    $hEdit = (Get-FileHash -LiteralPath $tuned).Hash
+    $r3 = Invoke-PyHelper $py $helper @($optPy, $profPath, 'max', 'preserve-edits') 30
+    Assert-That 'edited tuned file is NOT overwritten' ((Get-FileHash -LiteralPath $tuned).Hash -eq $hEdit)
+    Assert-That 'script says it kept the edited file' ($r3.Output -match 'Kept your edited')
+    # a pre-existing tuned file with no sidecar counts as the user's
+    Remove-Item -LiteralPath $side -Force
+    [void](Invoke-PyHelper $py $helper @($optPy, $profPath, 'max', 'preserve-edits') 30)
+    Assert-That 'tuned file without sidecar is treated as yours (kept)' ((Get-FileHash -LiteralPath $tuned).Hash -eq $hEdit)
+    # overwrite policy (old behaviour) still overwrites
+    [void](Invoke-PyHelper $py $helper @($optPy, $profPath, 'max', 'overwrite') 30)
+    Assert-That 'overwrite policy keeps the old behaviour' ((Get-FileHash -LiteralPath $tuned).Hash -ne $hEdit)
+
+    # CLI flags exist (help text only; argparse exits, nothing endless)
+    $rh = Invoke-PyHelper $py $optPy @('--help') 20
+    Assert-That '--help exits (never loops)' (-not $rh.TimedOut)
+    Assert-That '--keep-awake and --tuned-policy are offered' ($rh.Output -match '--keep-awake' -and $rh.Output -match '--tuned-policy')
 } else { Write-Host '  (python not found, skipped)' -ForegroundColor Yellow }
+
+Write-Host 'Owned-file undo (tuned profile)'
+$ow = Join-Path $tmp 'owned'; New-Item -ItemType Directory -Path $ow | Out-Null
+$of = Join-Path $ow 'X_tuned.xml'; $os = $of + '.kpekpes-sha256'
+Set-Content -LiteralPath $of -Value 'generated' -NoNewline
+Set-Content -LiteralPath $os -Value (Get-FileHash -LiteralPath $of -Algorithm SHA256).Hash.ToLower() -NoNewline
+$oe = [pscustomobject]@{ Path = $of; Sidecar = $os }
+Assert-That 'unchanged generated file is removed' ((Restore-OwnedFileEntry $oe) -eq 'ok' -and -not (Test-Path -LiteralPath $of) -and -not (Test-Path -LiteralPath $os))
+Set-Content -LiteralPath $of -Value 'generated' -NoNewline
+Set-Content -LiteralPath $os -Value (Get-FileHash -LiteralPath $of -Algorithm SHA256).Hash.ToLower() -NoNewline
+Set-Content -LiteralPath $of -Value 'generated + my edit' -NoNewline
+Assert-That 'edited file is kept, not deleted' ((Restore-OwnedFileEntry $oe) -eq 'kept' -and (Test-Path -LiteralPath $of))
 
 Write-Host 'Launcher templates'
 $bat = Get-Content -LiteralPath (Join-Path $repo 'controller\controller_optimizer.bat.template') -Raw
-foreach ($tok in @('@@PROFILE@@', '@@DS4EXE@@', '@@STRAFE@@')) { Assert-That ('bat template has ' + $tok) ($bat.Contains($tok)) }
-$gen = $bat.Replace('@@PROFILE@@', 'C:\p\EUPHO.xml').Replace('@@DS4EXE@@', 'C:\d\DS4Windows.exe').Replace('@@STRAFE@@', 'max')
+foreach ($tok in @('@@PROFILE@@', '@@DS4EXE@@', '@@STRAFE@@', '@@PYTHON@@', '@@KEEPAWAKE@@', '@@TUNEDPOLICY@@')) { Assert-That ('bat template has ' + $tok) ($bat.Contains($tok)) }
+$gen = $bat.Replace('@@PROFILE@@', 'C:\p\EUPHO.xml').Replace('@@DS4EXE@@', 'C:\d\DS4Windows.exe').Replace('@@STRAFE@@', 'max').Replace('@@PYTHON@@', 'C:\Program Files\Python312\python.exe').Replace('@@KEEPAWAKE@@', 'games').Replace('@@TUNEDPOLICY@@', 'preserve-edits')
 Assert-That 'no placeholder left after generation' (-not $gen.Contains('@@'))
 Assert-That 'bat keeps the duplicate-run guard' ($gen -match 'ds4_optimize_final\.py')
+Assert-That 'bat uses the full interpreter path, not PATH lookup' ($gen -match '"C:\\Program Files\\Python312\\python\.exe" -u' -and -not ($gen -match '(?m)^\s*(python|py) '))
+Assert-That 'bat passes the keep-awake and tuned-policy flags' ($gen -match '--keep-awake games' -and $gen -match '--tuned-policy preserve-edits')
 Assert-That 'no personal path in the template' (-not ($bat -match 'kerem'))
 Assert-That 'vbs template has a placeholder' ((Get-Content -LiteralPath (Join-Path $repo 'controller\run_hidden.vbs.template') -Raw).Contains('@@BAT@@'))
 
@@ -172,6 +254,39 @@ $tw2 = Get-PcRegTweaks $cfg2
 Assert-That 'config switch removes the Windows Update group' (-not (@($tw2 | Where-Object { $_.Group -eq 'Windows Update control' }).Count -gt 0))
 Assert-That 'config switch removes the memory-integrity group' (-not (@($tw2 | Where-Object { $_.Group -eq 'Memory integrity' }).Count -gt 0))
 Assert-That 'config switch removes the game-process group' (-not (@($tw2 | Where-Object { $_.Group -eq 'Game process' }).Count -gt 0))
+
+Assert-That 'default: toast tweak is NOT applied' (-not (@($tw | Where-Object { $_.Name -eq 'ToastEnabled' }).Count -gt 0))
+Assert-That 'default: memory-integrity group is NOT applied' (-not (@($tw | Where-Object { $_.Group -eq 'Memory integrity' }).Count -gt 0))
+$cfg3 = Get-KDefaultConfig; $cfg3.DisableToastNotifications = $true; $cfg3.HvciOff = $true
+$tw3 = Get-PcRegTweaks $cfg3
+Assert-That 'opt-in toast switch adds the tweak' (@($tw3 | Where-Object { $_.Name -eq 'ToastEnabled' }).Count -eq 1)
+Assert-That 'opt-in HvciOff switch adds the group' (@($tw3 | Where-Object { $_.Group -eq 'Memory integrity' }).Count -gt 0)
+
+Write-Host 'Python safety check (ACL rules)'
+$sys = 'S-1-5-18'; $adm = 'S-1-5-32-544'; $usr = 'S-1-5-32-545'; $auth = 'S-1-5-11'; $me = 'S-1-5-21-1-2-3-1001'
+Assert-That 'SYSTEM full control is safe' (-not (Test-AceUnsafe $sys 0x1F01FF 'Allow'))
+Assert-That 'Administrators full control is safe' (-not (Test-AceUnsafe $adm 0x1F01FF 'Allow'))
+Assert-That 'Users read+execute is safe' (-not (Test-AceUnsafe $usr 0x1200A9 'Allow'))
+Assert-That 'Users modify is UNSAFE' (Test-AceUnsafe $usr 0x1301BF 'Allow')
+Assert-That 'Authenticated Users write is UNSAFE' (Test-AceUnsafe $auth 0x2 'Allow')
+Assert-That 'the current user having full control is UNSAFE (per-user install)' (Test-AceUnsafe $me 0x1F01FF 'Allow')
+Assert-That 'a deny entry is not a risk' (-not (Test-AceUnsafe $usr 0x1301BF 'Deny'))
+Assert-That 'inherit-only entry does not apply to the folder itself' (-not (Test-AceUnsafe $usr 0x1301BF 'Allow' $true $true))
+Assert-That 'parent folder: plain create-folder right is not a risk' (-not (Test-AceUnsafe $auth 0x4 'Allow' $false $false))
+Assert-That 'parent folder: delete-children right IS a risk' (Test-AceUnsafe $usr 0x40 'Allow' $false $false)
+
+Write-Host 'Service restore: delayed flag + hibernate + shadow storage parsing'
+Assert-That 'service restore function handles the delayed flag' ((Get-Command Restore-ServiceEntry).ScriptBlock.ToString() -match 'DelayedAutostart')
+Assert-That 'hibernate restore knows Existed (exact restore)' ((Get-Command Restore-HibernateEntry).ScriptBlock.ToString() -match 'Existed')
+$vss1 = "vssadmin 1.1`r`nShadow Copy Storage association`r`n   For volume: (C:)\\?\Volume{abc}\`r`n   Maximum Shadow Copy Storage space: 10 GB (2%)`r`n"
+$pv = ConvertFrom-VssStorageText $vss1 'C:'
+Assert-That 'vss text: size parsed (2%)' ($pv.Known -and $pv.Had -and $pv.Percent -eq 2 -and -not $pv.Unbounded)
+$pv2 = ConvertFrom-VssStorageText "Shadow Copy Storage association`r`n   For volume: (C:)\x`r`n   Maximum Shadow Copy Storage space: UNBOUNDED (100%)`r`n" 'C:'
+Assert-That 'vss text: UNBOUNDED parsed' ($pv2.Had -and $pv2.Unbounded)
+$pv3 = ConvertFrom-VssStorageText "No items found that satisfy the query." 'C:'
+Assert-That 'vss text: no association = Known, not Had' ($pv3.Known -and -not $pv3.Had)
+$pv4 = ConvertFrom-VssStorageText 'garbled or localized output' 'C:'
+Assert-That 'vss text: unreadable = not Known (nothing will be changed)' (-not $pv4.Known)
 
 Write-Host 'Undo engine (file-level entries, end to end)'
 $u = Join-Path $tmp 'undo'; New-Item -ItemType Directory -Path $u -Force | Out-Null

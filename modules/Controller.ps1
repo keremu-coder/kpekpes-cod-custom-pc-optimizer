@@ -50,13 +50,92 @@ function Test-PythonWorks {
     } catch { return $false }
 }
 
-function Find-Python {
-    # Returns 'python', 'py' or '' . The Microsoft Store "python" stub does not count as Python.
-    $py = Get-Command py -ErrorAction SilentlyContinue
-    if ($py -and (Test-PythonWorks $py.Source @('-3', '--version'))) { return 'py' }
-    foreach ($p in @(Get-Command python -All -ErrorAction SilentlyContinue)) {
-        if (Test-PythonWorks $p.Source @('--version')) { return 'python' }
+# ---------------- Python: full path + "is it safe to run elevated?" ----------------
+# The logon task runs with admin rights. If it ran a Python that normal users can edit (a per-user install),
+# anything running as you could swap that python.exe and get admin. So the interpreter is stored as a FULL path,
+# and a user-writable one is refused unless Controller.AllowUserWritablePython is set in config.json.
+
+$script:AceSafeSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-3-0', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+
+function Test-AceUnsafe {
+    # True if this access rule lets a non-administrator change or replace the thing it protects.
+    # Strict = the file itself or the folder it sits in (any write counts).
+    # Not strict = a parent folder (only rights that can delete or replace the child count; plain "create" does not).
+    param([string]$Sid, [int64]$Rights, [string]$Type, [bool]$InheritOnly = $false, [bool]$Strict = $true)
+    if ($Type -ne 'Allow') { return $false }
+    if ($InheritOnly) { return $false }
+    if ($script:AceSafeSids -contains $Sid) { return $false }
+    $generic = [int64]0x50000000                       # GENERIC_ALL | GENERIC_WRITE
+    $replace = [int64](0x10000 + 0x40 + 0x40000 + 0x80000) + $generic   # Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership
+    $write   = [int64](0x2 + 0x4)                       # WriteData / AppendData
+    $mask = $replace
+    if ($Strict) { $mask = $replace + $write }
+    return (($Rights -band $mask) -ne 0)
+}
+
+function Get-PathWriteRisks {
+    # Walks the file, its folder and every parent folder up to the drive root. Returns a list of reasons (empty = safe).
+    param([string]$Path)
+    $risks = New-Object System.Collections.ArrayList
+    $cur = $Path
+    $level = 0
+    $guard = 0
+    while ($cur -and $guard -lt 40) {
+        $guard++
+        if (Test-Path -LiteralPath $cur) {
+            try {
+                $acl = Get-Acl -LiteralPath $cur -ErrorAction Stop
+                $strict = ($level -le 1)
+                foreach ($ace in @($acl.Access)) {
+                    $sid = ''
+                    try { $sid = $ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { $sid = [string]$ace.IdentityReference.Value }
+                    $inh = (($ace.PropagationFlags.ToString()) -match 'InheritOnly')
+                    if ($level -eq 0) { $inh = $false }
+                    if (Test-AceUnsafe $sid ([int64][int]$ace.FileSystemRights) ([string]$ace.AccessControlType) $inh $strict) {
+                        [void]$risks.Add(($cur + ' is writable by ' + [string]$ace.IdentityReference.Value))
+                    }
+                }
+            } catch { [void]$risks.Add(($cur + ': permissions could not be read')) }
+        }
+        $parent = Split-Path -Path $cur -Parent
+        if (-not $parent -or $parent -eq $cur) { break }
+        $cur = $parent
+        $level++
     }
+    return @($risks)
+}
+
+function Get-PythonCandidates {
+    $c = New-Object System.Collections.ArrayList
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if ($py) {
+        try {
+            $o = (& $py.Source -3 -c 'import sys; print(sys.executable)' 2>&1 | Out-String).Trim()
+            if ($o -and (Test-Path -LiteralPath $o -PathType Leaf)) { [void]$c.Add($o) }
+        } catch { }
+    }
+    foreach ($p in @(Get-Command python -All -ErrorAction SilentlyContinue)) { if ($p.Source) { [void]$c.Add($p.Source) } }
+    # machine-wide installs (winget --scope machine, python.org "all users") that this window's PATH may not know yet
+    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($root -and (Test-Path -LiteralPath $root)) {
+            Get-ChildItem -LiteralPath $root -Directory -Filter 'Python3*' -ErrorAction SilentlyContinue | ForEach-Object {
+                $e = Join-Path $_.FullName 'python.exe'
+                if (Test-Path -LiteralPath $e) { [void]$c.Add($e) }
+            }
+        }
+    }
+    return @($c | Select-Object -Unique)
+}
+
+function Find-Python {
+    # Returns the FULL path of a working Python 3 ('' if none). A machine-wide (admin-only) one is preferred.
+    # The Microsoft Store "python" stub does not count as Python.
+    $working = New-Object System.Collections.ArrayList
+    foreach ($p in (Get-PythonCandidates)) {
+        if (Test-PythonWorks $p @('--version')) { [void]$working.Add($p) }
+    }
+    foreach ($p in $working) { if ((Get-PathWriteRisks $p).Count -eq 0) { return $p } }
+    if ($working.Count -gt 0) { return [string]$working[0] }
     return ''
 }
 
@@ -118,15 +197,28 @@ function Install-Controller {
 
     Write-Say '[2/7] Python' 'Cyan'
     $py = Find-Python
-    if (-not $py -and -not $script:Silent -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-        $a = Read-Host '  Python 3 is not installed. Install it now with winget? (y/n)'
+    $risks = @()
+    if ($py) { $risks = @(Get-PathWriteRisks $py) }
+    $needInstall = (-not $py) -or ($risks.Count -gt 0 -and -not $Cfg.Controller.AllowUserWritablePython)
+    if ($needInstall -and -not $script:Silent -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+        if ($py) { Write-Say ('  the Python found (' + $py + ') can be edited by normal users, which is not safe for a task that runs as administrator') 'Yellow' }
+        $a = Read-Host '  Install a machine-wide Python 3 (admin-only folder) with winget now? (y/n)'
         if ($a -match '^(y|yes)$') {
-            & winget.exe install -e --id Python.Python.3.12 --accept-package-agreements --accept-source-agreements
+            & winget.exe install -e --id Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements
             $py = Find-Python
-            if (-not $py) { $res.Message = 'Python was installed but is not visible to this window yet. Close this window, open it again and re-run.'; return $res }
+            if ($py) { $risks = @(Get-PathWriteRisks $py) }
+            if (-not $py) { $res.Message = 'Python was installed but could not be found. Close this window, open it again and re-run.'; return $res }
         }
     }
-    if (-not $py) { $res.Message = 'Python 3 is required for the controller optimizer. Install it from python.org (tick "Add python.exe to PATH") and run again.'; return $res }
+    if (-not $py) { $res.Message = 'Python 3 is required for the controller optimizer. Install it for all users (winget install -e --id Python.Python.3.12 --scope machine) and run again.'; return $res }
+    if ($risks.Count -gt 0) {
+        if ($Cfg.Controller.AllowUserWritablePython) {
+            Write-Say ('  WARNING: ' + $py + ' can be edited by normal users. Allowed because Controller.AllowUserWritablePython is true.') 'Yellow'
+        } else {
+            $res.Message = ('The Python at ' + $py + ' can be edited by normal users (' + $risks[0] + '). The logon task runs as administrator, so it will not use it. Install a machine-wide Python: winget install -e --id Python.Python.3.12 --scope machine , then run again. (Or set Controller.AllowUserWritablePython to true in config.json if you accept that risk.)')
+            return $res
+        }
+    }
     Write-Say ('  Python OK (' + $py + ')') 'Green'
 
     if ($script:WhatIfMode) { Write-Say '  [what-if] would install the controller module now' 'Yellow'; $res.Ok = $true; return $res }
@@ -144,7 +236,9 @@ function Install-Controller {
     foreach ($f in @($pyDst, $batDst, $vbsDst)) { [void](Add-KEntry ('file|' + $f) @{ Type = 'file'; Path = $f }) }
     Copy-Item -LiteralPath (Join-Path $ctl 'ds4_optimize_final.py') -Destination $pyDst -Force
     $bat = (Get-Content -LiteralPath (Join-Path $ctl 'controller_optimizer.bat.template') -Raw -Encoding UTF8)
-    $bat = $bat.Replace('@@PROFILE@@', $profile).Replace('@@DS4EXE@@', $exe).Replace('@@STRAFE@@', $strafe)
+    $keepAwake = [string]$Cfg.Controller.KeepAwake
+    $tunedPolicy = [string]$Cfg.Controller.TunedProfilePolicy
+    $bat = $bat.Replace('@@PROFILE@@', $profile).Replace('@@DS4EXE@@', $exe).Replace('@@STRAFE@@', $strafe).Replace('@@PYTHON@@', $py).Replace('@@KEEPAWAKE@@', $keepAwake).Replace('@@TUNEDPOLICY@@', $tunedPolicy)
     $bat = ($bat -replace "`r?`n", "`r`n")
     [IO.File]::WriteAllText($batDst, $bat, (New-Object Text.UTF8Encoding($false)))
     $vbs = (Get-Content -LiteralPath (Join-Path $ctl 'run_hidden.vbs.template') -Raw -Encoding UTF8).Replace('@@BAT@@', $batDst)
@@ -169,7 +263,18 @@ function Install-Controller {
 
     Write-Say '[5/7] Tuned profile (left-stick strafe boost)' 'Cyan'
     $tuned = Join-Path $profDir ($name + '_tuned.xml')
-    if (Test-Path -LiteralPath $tuned) {
+    $sidecar = $tuned + '.kpekpes-sha256'
+    if ($tunedPolicy -eq 'preserve-edits') {
+        if (Test-Path -LiteralPath $tuned) {
+            Write-Say '  a tuned profile already exists; it is kept as it is (your edits are never overwritten)' 'Green'
+            if (Test-Path -LiteralPath $sidecar) {
+                [void](Add-KEntry ('ownedfile|' + $tuned) @{ Type = 'ownedfile'; Path = $tuned; Sidecar = $sidecar })
+            }
+        } else {
+            [void](Add-KEntry ('ownedfile|' + $tuned) @{ Type = 'ownedfile'; Path = $tuned; Sidecar = $sidecar })
+            Write-Say '  the tuned profile is written once, then left alone if you edit it' 'Green'
+        }
+    } elseif (Test-Path -LiteralPath $tuned) {
         $bk = Join-Path $d.Backup ($name + '_tuned.' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.xml')
         Copy-Item -LiteralPath $tuned -Destination $bk -Force
         [void](Add-KEntry ('filerestore|' + $tuned) @{ Type = 'filerestore'; Path = $tuned; Backup = $bk })
@@ -246,7 +351,16 @@ function Get-ControllerVerifyResults {
             if ($lp -eq $vbs) { [void]$r.Add((New-KResult 'Profile launches the optimizer' 'PASS' '' $g)) }
             else { [void]$r.Add((New-KResult 'Profile launches the optimizer' 'WARN' 'LaunchProgram differs (the logon task still starts it)' $g)) }
         } else { [void]$r.Add((New-KResult ('Profile ' + $name + '.xml present') 'FAIL' '' $g)) }
-        if ((Test-Path -LiteralPath $tuned) -and $script:Strafe.ContainsKey($strafe)) {
+        $tunedEdited = $false
+        if ((Test-Path -LiteralPath $tuned) -and ([string]$Cfg.Controller.TunedProfilePolicy -eq 'preserve-edits')) {
+            $sc = $tuned + '.kpekpes-sha256'
+            if (Test-Path -LiteralPath $sc) {
+                $want = (Get-Content -LiteralPath $sc -Raw -ErrorAction SilentlyContinue)
+                if (-not $want -or $want.Trim().ToLower() -ne (Get-FileHash -LiteralPath $tuned -Algorithm SHA256).Hash.ToLower()) { $tunedEdited = $true }
+            } else { $tunedEdited = $true }
+        }
+        if ($tunedEdited) { [void]$r.Add((New-KResult 'Tuned profile' 'INFO' 'your own edited copy is kept; strafe values are not checked' $g)) }
+        elseif ((Test-Path -LiteralPath $tuned) -and $script:Strafe.ContainsKey($strafe)) {
             try {
                 $x = [xml](Get-Content -LiteralPath $tuned -Raw)
                 $ax = $x.SelectSingleNode('//LSAxialDeadOptions')
@@ -296,6 +410,7 @@ function Invoke-ControllerUndo {
         Write-Say '  could not restore (journal kept so you can run Undo again):' 'Red'
         foreach ($f in $res.Failed) { Write-Say ('    ' + $f) 'Red' }
     }
+    foreach ($m in $res.Manual) { Write-Say ('  note: ' + $m) 'Yellow' }
     Write-Say '  DS4Windows keeps running; its priority is back to normal.' 'Gray'
     return $res
 }

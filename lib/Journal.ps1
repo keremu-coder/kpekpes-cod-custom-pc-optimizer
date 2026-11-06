@@ -203,7 +203,7 @@ function Disable-KService {
     $key = 'HKLM:\SYSTEM\CurrentControlSet\Services\' + $Name
     $start = $null; $delayed = $null
     try { $start = (Get-ItemProperty -LiteralPath $key -Name Start -ErrorAction Stop).Start } catch { }
-    try { $delayed = (Get-ItemProperty -LiteralPath $key -Name DelayedAutostart -ErrorAction Stop).DelayedAutostart } catch { }
+    $delayed = Get-ServiceDelayed $Name
     $was = ($svc.Status -eq 'Running')
     [void](Add-KEntry ('svc|' + $Name) @{ Type = 'service'; Name = $Name; Start = $start; Delayed = $delayed; WasRunning = $was })
     try {
@@ -220,7 +220,28 @@ function Test-ServiceDisabled {
     return ($svc.StartType -eq 'Disabled')
 }
 
+function Get-ServiceDelayed {
+    # DelayedAutostart exactly as stored: $null when the value does not exist.
+    param([string]$Name)
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Services\' + $Name
+    $r = Get-RegRaw $key 'DelayedAutostart'
+    if (-not $r.Existed) { return $null }
+    return [int]$r.Raw
+}
+
+function Save-KServiceState {
+    # Journals a service's start type and delayed flag WITHOUT changing it (used before any code that may change it).
+    param([string]$Name)
+    $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+    if (-not $svc -or $script:WhatIfMode) { return }
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Services\' + $Name
+    $start = $null
+    try { $start = (Get-ItemProperty -LiteralPath $key -Name Start -ErrorAction Stop).Start } catch { }
+    [void](Add-KEntry ('svc|' + $Name) @{ Type = 'service'; Name = $Name; Start = $start; Delayed = (Get-ServiceDelayed $Name); WasRunning = ($svc.Status -eq 'Running') })
+}
+
 function Restore-ServiceEntry {
+    # Puts back the start type AND the delayed-start flag exactly (set it, or remove it if it was not there).
     param($e)
     try {
         $mode = $null
@@ -233,10 +254,17 @@ function Restore-ServiceEntry {
         elseif ($s -eq 0) { $mode = 'boot' }
         if (-not $mode) { return $false }
         & sc.exe config $e.Name start= $mode | Out-Null
-        if ($e.WasRunning -and $mode -ne 'disabled') { Start-Service -Name $e.Name -ErrorAction SilentlyContinue }
         $key = 'HKLM:\SYSTEM\CurrentControlSet\Services\' + $e.Name
+        # sc.exe config always rewrites DelayedAutostart (to 0), so put the recorded value back afterwards.
+        if ($null -ne $e.Delayed) { New-ItemProperty -LiteralPath $key -Name DelayedAutostart -PropertyType DWord -Value ([int]$e.Delayed) -Force -ErrorAction Stop | Out-Null }
+        else { Remove-ItemProperty -LiteralPath $key -Name DelayedAutostart -ErrorAction SilentlyContinue }
+        if ($e.WasRunning -and $mode -ne 'disabled') { Start-Service -Name $e.Name -ErrorAction SilentlyContinue }
         $now = (Get-ItemProperty -LiteralPath $key -Name Start -ErrorAction SilentlyContinue).Start
-        return ($now -eq $s)
+        $nowDelayed = Get-ServiceDelayed $e.Name
+        $delayedOk = $false
+        if ($null -eq $e.Delayed) { $delayedOk = ($null -eq $nowDelayed) }
+        elseif ($null -ne $nowDelayed) { $delayedOk = ($nowDelayed -eq [int]$e.Delayed) }
+        return (($now -eq $s) -and $delayedOk)
     } catch { return $false }
 }
 
@@ -408,6 +436,30 @@ function Restore-FileBackupEntry {
     } catch { return $false }
 }
 
+function Restore-OwnedFileEntry {
+    # Removes a file this tool created, but only if it is still exactly what the tool wrote
+    # (checked against the hash saved next to it). A file you edited is kept.
+    # Returns 'ok', 'kept' (left on purpose) or 'fail'.
+    param($e)
+    try {
+        $side = [string]$e.Sidecar
+        if (-not (Test-Path -LiteralPath $e.Path)) {
+            if ($side -and (Test-Path -LiteralPath $side)) { Remove-Item -LiteralPath $side -Force -ErrorAction SilentlyContinue }
+            return 'ok'
+        }
+        $same = $false
+        if ($side -and (Test-Path -LiteralPath $side)) {
+            $want = (Get-Content -LiteralPath $side -Raw -ErrorAction SilentlyContinue)
+            if ($want) { $same = ($want.Trim().ToLower() -eq (Get-FileHash -LiteralPath $e.Path -Algorithm SHA256).Hash.ToLower()) }
+        }
+        if (-not $same) { return 'kept' }
+        Remove-Item -LiteralPath $e.Path -Force -ErrorAction Stop
+        if ($side -and (Test-Path -LiteralPath $side)) { Remove-Item -LiteralPath $side -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $e.Path) { return 'fail' }
+        return 'ok'
+    } catch { return 'fail' }
+}
+
 function Stop-KProcessByCommandLine {
     param([string]$Pattern)
     try {
@@ -415,6 +467,75 @@ function Stop-KProcessByCommandLine {
             Where-Object { $_.CommandLine -and $_.CommandLine -like $Pattern -and $_.ProcessId -ne $PID } |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     } catch { }
+}
+
+# ======================= hibernate =======================
+
+$script:PowerKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power'
+
+function Restore-HibernateEntry {
+    # Restores the hibernate state AND whether the HibernateEnabled value existed at all.
+    param($e)
+    try {
+        if (-not $e.PSObject.Properties['Existed']) {
+            # journal written by an older version: only on/off was recorded
+            if ($e.Enabled) { & powercfg.exe /hibernate on | Out-Null }
+            return $true
+        }
+        if ($e.Existed -and ([int]$e.Value -eq 1)) { & powercfg.exe /hibernate on | Out-Null }
+        else { & powercfg.exe /hibernate off | Out-Null }
+        if (-not $e.Existed) { Remove-ItemProperty -LiteralPath $script:PowerKey -Name HibernateEnabled -ErrorAction SilentlyContinue }
+        $now = Get-RegRaw $script:PowerKey 'HibernateEnabled'
+        if (-not $e.Existed) { return (-not $now.Existed) }
+        return ($now.Existed -and ([int]$now.Raw -eq [int]$e.Value))
+    } catch { return $false }
+}
+
+# ======================= System Protection / shadow storage =======================
+
+function ConvertFrom-VssStorageText {
+    # Parses `vssadmin list shadowstorage` (English output). Known=$false means "could not read it": then nothing is changed.
+    param([string]$Text, [string]$Drive)
+    $r = [pscustomobject]@{ Known = $false; Had = $false; Percent = $null; Unbounded = $false }
+    if (-not $Text) { return $r }
+    if ($Text -notmatch '(?i)No items found|Shadow Copy Storage') { return $r }
+    $r.Known = $true
+    $d = [regex]::Escape($Drive)
+    foreach ($b in [regex]::Split($Text, '(?i)Shadow Copy Storage association')) {
+        if ($b -match ('(?i)For volume:\s*\(' + $d + '\)')) {
+            $r.Had = $true
+            if ($b -match '(?i)Maximum Shadow Copy Storage space:\s*UNBOUNDED') { $r.Unbounded = $true }
+            else {
+                $m = [regex]::Match($b, '(?i)Maximum Shadow Copy Storage space:[^\(\r\n]*\((\d+)%\)')
+                if ($m.Success) { $r.Percent = [int]$m.Groups[1].Value }
+            }
+            break
+        }
+    }
+    return $r
+}
+
+function Get-KShadowStorage {
+    param([string]$Drive)
+    $txt = ''
+    try { $txt = (& vssadmin.exe list shadowstorage 2>&1 | Out-String) } catch { }
+    return (ConvertFrom-VssStorageText $txt $Drive)
+}
+
+function Restore-SysProtEntry {
+    # Puts the shadow-storage size back. It NEVER turns System Protection off, because that would delete
+    # the restore points (including the one made for this run). The caller adds a manual note instead.
+    param($e)
+    try {
+        if (-not $e.Known -or -not $e.Had) { return $true }
+        if ($e.Unbounded) { $arg = '/maxsize=UNBOUNDED' }
+        elseif ($null -ne $e.Percent) { $arg = '/maxsize=' + [int]$e.Percent + '%' }
+        else { return $true }
+        & vssadmin.exe resize shadowstorage ('/for=' + $e.Drive) ('/on=' + $e.Drive) $arg 2>&1 | Out-Null
+        $now = Get-KShadowStorage ([string]$e.Drive)
+        if ($e.Unbounded) { return ($now.Had -and $now.Unbounded) }
+        return ($now.Had -and ($now.Percent -eq [int]$e.Percent))
+    } catch { return $false }
 }
 
 # ======================= the undo engine =======================
@@ -445,7 +566,13 @@ function Invoke-KRevert {
             elseif ($t -eq 'bcd') { $ok = Restore-BcdEntry $e }
             elseif ($t -eq 'netsh') { $ok = Restore-NetshEntry $e }
             elseif ($t -eq 'powerscheme') { $ok = Restore-PowerEntry $e }
-            elseif ($t -eq 'hibernate') { if ($e.Enabled) { & powercfg.exe /hibernate on | Out-Null } }
+            elseif ($t -eq 'hibernate') { $ok = Restore-HibernateEntry $e }
+            elseif ($t -eq 'sysprot') {
+                $ok = Restore-SysProtEntry $e
+                if ($e.Known -and -not $e.Had) {
+                    [void]$manual.Add('System Protection was off before this tool ran. It was left ON so your restore point stays usable. Turn it off in System Properties > System Protection if you want (that deletes restore points).')
+                }
+            }
             elseif ($t -eq 'fsutil') { & fsutil.exe behavior set ([string]$e.Name) ([string]$e.Value) | Out-Null; $ok = ($LASTEXITCODE -eq 0) }
             elseif ($t -eq 'nicprop') { $ok = Restore-NicPropEntry $e }
             elseif ($t -eq 'nicstate') { $ok = Restore-NicStateEntry $e }
@@ -466,6 +593,11 @@ function Invoke-KRevert {
             elseif ($t -eq 'dir') {
                 if (Test-Path -LiteralPath $e.Path) { Remove-Item -LiteralPath $e.Path -Recurse -Force -ErrorAction SilentlyContinue }
                 $ok = (-not (Test-Path -LiteralPath $e.Path))
+            }
+            elseif ($t -eq 'ownedfile') {
+                $o = Restore-OwnedFileEntry $e
+                if ($o -eq 'fail') { $ok = $false }
+                elseif ($o -eq 'kept') { [void]$manual.Add('Kept your edited file (not deleted): ' + [string]$e.Path) }
             }
             elseif ($t -eq 'xmltext') { $ok = Restore-XmlTextEntry $e }
             elseif ($t -eq 'filerestore') { $ok = Restore-FileBackupEntry $e }

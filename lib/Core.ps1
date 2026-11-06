@@ -51,10 +51,14 @@ function Get-KDefaultConfig {
         WindowsUpdateBlock = $true   # no driver updates via Windows Update, no auto-reboot, no Store auto-download
         RemoveXboxApps     = $true   # Game Bar / Xbox overlay apps
         DisableServices    = $true   # SysMain, DiagTrack, WSearch and friends
-        HvciOff            = $true   # Memory integrity / VBS off
+        HvciOff            = $false  # OPT-IN. Memory integrity / VBS / hypervisor off (lowers security, breaks WSL2/Hyper-V)
         LogonReapply       = $true   # re-apply the PC tweaks at every logon
+        ReapplyUserPreferences = $false  # logon re-apply also resets mouse / visual / input choices (off = leaves them alone)
+        DisableToastNotifications = $false  # OPT-IN. Can also hide Windows Security alerts
+        UsePlatformTick    = $false  # OPT-IN. Unproven; measure with the Compare option first
     }
-    $ctl = [ordered]@{ DS4WindowsExe = ''; ProfileName = 'EUPHO'; StrafeBoost = 'max' }
+    # AllowUserWritablePython: the elevated logon task refuses a Python that normal users can edit, unless you set this.
+    $ctl = [ordered]@{ DS4WindowsExe = ''; ProfileName = 'EUPHO'; StrafeBoost = 'max'; KeepAwake = 'games'; TunedProfilePolicy = 'preserve-edits'; AllowUserWritablePython = $false }
     $c['Controller'] = $ctl
     return $c
 }
@@ -71,6 +75,10 @@ function Get-KConfig {
                             if ($null -ne $f.Controller.$ck) { $cfg['Controller'][$ck] = $f.Controller.$ck }
                         }
                     }
+                    # only known values are accepted for the choice settings
+                    if (@('always', 'games', 'never') -notcontains [string]$cfg['Controller']['KeepAwake']) { $cfg['Controller']['KeepAwake'] = 'games' }
+                    if (@('overwrite', 'preserve-edits') -notcontains [string]$cfg['Controller']['TunedProfilePolicy']) { $cfg['Controller']['TunedProfilePolicy'] = 'preserve-edits' }
+                    $cfg['Controller']['AllowUserWritablePython'] = [bool]$cfg['Controller']['AllowUserWritablePython']
                 } elseif ($null -ne $f.$k) {
                     $cfg[$k] = [bool]$f.$k
                 }

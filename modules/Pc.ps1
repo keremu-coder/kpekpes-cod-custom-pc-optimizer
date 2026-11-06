@@ -191,7 +191,10 @@ function Get-PcRegTweaks {
     Add-RT $g 'Cortana policy off' 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' 'AllowCortana' 0
     Add-RT $g 'Cortana consent off' 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search' 'CortanaConsent' 0
     Add-RT $g 'Search box suggestions off' 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' 'DisableSearchBoxSuggestions' 1
-    Add-RT $g 'Toast notifications off' 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' 'ToastEnabled' 0
+    if ($Cfg.DisableToastNotifications) {
+        # opt-in: this switch can also hide Windows Security alerts
+        Add-RT $g 'Toast notifications off' 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' 'ToastEnabled' 0
+    }
     Add-RT $g 'Copilot off' 'HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot' 1
     Add-RT $g 'Sync provider notifications off' $adv 'ShowSyncProviderNotifications' 0
     Add-RT $g 'Taskbar widgets off' $adv 'TaskbarDa' 0 'DWord' $false $true
@@ -249,9 +252,11 @@ function Get-PcRegTweaks {
 }
 
 function Invoke-PcRegTweaks {
-    param($Cfg)
+    param($Cfg, [switch]$Reapply)
     $fail = 0
     foreach ($t in (Get-PcRegTweaks $Cfg)) {
+        # The logon re-apply leaves your own mouse / visual / input choices alone unless you switch it on.
+        if ($Reapply -and -not $Cfg.ReapplyUserPreferences -and $t.Group -eq 'Visual effects & input') { continue }
         $ok = Set-KReg $t.Path $t.Name $t.Value $t.Kind
         if (-not $ok -and -not $t.BestEffort) { $fail++ }
     }
@@ -270,7 +275,10 @@ function Invoke-RestorePointSafe {
     try {
         foreach ($s in @('VSS', 'swprv')) {
             $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
-            if ($svc -and $svc.StartType -eq 'Disabled') { Set-Service -Name $s -StartupType Manual -ErrorAction SilentlyContinue }
+            if ($svc -and $svc.StartType -eq 'Disabled') {
+                Save-KServiceState $s   # journaled first, so Undo puts the start type back
+                Set-Service -Name $s -StartupType Manual -ErrorAction SilentlyContinue
+            }
         }
         $pol = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\SystemRestore'
         foreach ($n in @('DisableSR', 'DisableConfig')) {
@@ -278,7 +286,11 @@ function Invoke-RestorePointSafe {
             if ($v -eq 1) { [void](Set-KReg $pol $n 0) }
         }
         Enable-ComputerRestore -Drive ($env:SystemDrive + '\') -ErrorAction Stop
-        try { & vssadmin.exe resize shadowstorage ('/for=' + $env:SystemDrive) ('/on=' + $env:SystemDrive) '/maxsize=10%' 2>&1 | Out-Null } catch { }
+        $before = Get-KShadowStorage $env:SystemDrive
+        if ($before.Known) {
+            [void](Add-KEntry ('sysprot|' + $env:SystemDrive) @{ Type = 'sysprot'; Drive = $env:SystemDrive; Known = $before.Known; Had = $before.Had; Percent = $before.Percent; Unbounded = $before.Unbounded })
+            try { & vssadmin.exe resize shadowstorage ('/for=' + $env:SystemDrive) ('/on=' + $env:SystemDrive) '/maxsize=10%' 2>&1 | Out-Null } catch { }
+        }
         New-ItemProperty -LiteralPath $srKey -Name $freqName -PropertyType DWord -Value 0 -Force -ErrorAction SilentlyContinue | Out-Null
         $desc = 'Before Kpekpes COD Custom ' + (Get-Date -Format 'yyyy-MM-dd HH:mm')
         $made = $false; $err = ''
@@ -365,9 +377,10 @@ function Invoke-PcPower {
 
 # ---------------- timer ----------------
 function Invoke-PcTimer {
+    param($Cfg)
     if ($script:WhatIfMode) { Write-Say '  [what-if] would set the boot clock options and start the 0.5 ms timer holder' 'Yellow'; return $true }
     [void](Set-KBcd 'disabledynamictick' 'yes')
-    [void](Set-KBcd 'useplatformtick' 'yes')
+    if ($Cfg.UsePlatformTick) { [void](Set-KBcd 'useplatformtick' 'yes') }
     $dir = Join-Path $script:DataRoot 'pc'
     $hp = Join-Path $dir 'TimerResolutionHold.ps1'
     $hold = @'
@@ -495,9 +508,10 @@ function Invoke-PcDisk {
         [void](Add-KEntry ('fsutil|' + $pair[0]) @{ Type = 'fsutil'; Name = $pair[0]; Value = $old })
         if (-not $script:WhatIfMode) { & fsutil.exe behavior set $pair[0] $pair[1] | Out-Null }
     }
-    $hib = $false
-    try { $hib = ((Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -Name HibernateEnabled -ErrorAction Stop).HibernateEnabled -eq 1) } catch { }
-    [void](Add-KEntry 'hibernate' @{ Type = 'hibernate'; Enabled = $hib })
+    $hs = Get-RegRaw $script:PowerKey 'HibernateEnabled'
+    $hv = $null
+    if ($hs.Existed) { $hv = [int]$hs.Raw }
+    [void](Add-KEntry 'hibernate' @{ Type = 'hibernate'; Existed = $hs.Existed; Value = $hv; Enabled = ($hs.Existed -and $hv -eq 1) })
     if (-not $script:WhatIfMode) { & powercfg.exe /hibernate off | Out-Null }
 }
 
@@ -625,7 +639,8 @@ function Get-PcVerifyResults {
     }
 
     # boot config
-    $bcdWant = [ordered]@{ disabledynamictick = 'yes'; useplatformtick = 'yes' }
+    $bcdWant = [ordered]@{ disabledynamictick = 'yes' }
+    if ($Cfg.UsePlatformTick) { $bcdWant['useplatformtick'] = 'yes' }
     if ($Cfg.HvciOff) { $bcdWant['hypervisorlaunchtype'] = 'off' }
     foreach ($k in $bcdWant.Keys) {
         $v = Get-BcdValue $k
@@ -765,7 +780,7 @@ function Invoke-PcOptimize {
     try { if (-not (Invoke-PcPower)) { [void]$problems.Add('power plan') } } catch { [void]$problems.Add('power plan: ' + $_.Exception.Message) }
 
     Write-PcStep 'Registry tweaks (graphics, Game Mode off, scheduling, input, network, privacy)'
-    try { $f = Invoke-PcRegTweaks $Cfg; if ($f -gt 0) { [void]$problems.Add([string]$f + ' registry value(s) could not be written') } } catch { [void]$problems.Add('registry: ' + $_.Exception.Message) }
+    try { $f = Invoke-PcRegTweaks $Cfg -Reapply:$Reapply; if ($f -gt 0) { [void]$problems.Add([string]$f + ' registry value(s) could not be written') } } catch { [void]$problems.Add('registry: ' + $_.Exception.Message) }
 
     Write-PcStep 'Background services'
     if ($Cfg.DisableServices) {
@@ -776,7 +791,7 @@ function Invoke-PcOptimize {
     } else { Write-Say '  skipped (config)' 'DarkGray' }
 
     Write-PcStep '0.5 ms timer + boot clock settings'
-    try { if (-not (Invoke-PcTimer)) { [void]$problems.Add('timer task') } } catch { [void]$problems.Add('timer: ' + $_.Exception.Message) }
+    try { if (-not (Invoke-PcTimer $Cfg)) { [void]$problems.Add('timer task') } } catch { [void]$problems.Add('timer: ' + $_.Exception.Message) }
     if ($Cfg.HvciOff) {
         # Memory integrity off also needs the hypervisor launch option off (journaled like every other change).
         if (-not (Set-KBcd 'hypervisorlaunchtype' 'off')) { [void]$problems.Add('hypervisorlaunchtype') }
@@ -836,7 +851,9 @@ function Invoke-PcUndo {
     if ($res.Manual.Count -gt 0) {
         Write-Say '  one-time manual step:' 'Yellow'
         foreach ($m in $res.Manual) { Write-Say ('    ' + $m) 'Yellow' }
-        try { Start-Process 'ms-windows-store://search/?query=Xbox%20Game%20Bar' } catch { }
+        if (@($res.Manual | Where-Object { $_ -match 'Xbox' }).Count -gt 0) {
+            try { Start-Process 'ms-windows-store://search/?query=Xbox%20Game%20Bar' } catch { }
+        }
     }
     Write-Say '  Restart Windows to finish.' 'Yellow'
     return $res
