@@ -125,9 +125,25 @@ function Install-Controller {
     $bat = (Get-Content -LiteralPath (Join-Path $ctl 'controller_optimizer.bat.template') -Raw -Encoding UTF8)
     $keepAwake = [string]$Cfg.Controller.KeepAwake
     $tunedPolicy = [string]$Cfg.Controller.TunedProfilePolicy
-    $hard = [bool]$Cfg.Controller.HardenedLogon
+    # DS4Windows start: with admin rights only when nobody but an administrator can replace it (or the profile it reads).
+    # Otherwise it starts WITHOUT admin rights, and the strafe boost is still written at every logon, by the same non-admin task.
+    $dsMode = [string]$Cfg.Controller.DS4Elevation
+    $hard = ($dsMode -eq 'normal')
+    if ($dsMode -eq 'auto') {
+        $hard = $true
+        if (Get-Command Test-KPathSafeForElevation -ErrorAction SilentlyContinue) {
+            $sx = Test-KPathSafeForElevation $exe
+            $sp = Test-KPathSafeForElevation $profDir
+            if ($sx.Safe -and $sp.Safe) { $hard = $false }
+            else {
+                $why = $sx.Reason; if ($sx.Safe) { $why = $sp.Reason }
+                Write-Say ('  DS4Windows will start WITHOUT admin rights: ' + $why) 'Yellow'
+                Write-Say '  (move DS4Windows and its profiles under C:\Program Files if you want it to start with admin rights)' 'Yellow'
+            }
+        }
+    }
     if ($hard) {
-        $ds4Block = ':: DS4Windows is started by its own non-elevated logon task (HardenedLogon is on).'
+        $ds4Block = ':: DS4Windows is started by its own non-elevated logon task (it runs without admin rights).'
         $optFlags = '--keep-awake ' + $keepAwake
     } else {
         # as in the original: this elevated launcher starts DS4Windows and the strafe boost is applied at every logon
@@ -189,24 +205,24 @@ function Install-Controller {
         & $exeDst --profile $profile --strafe-boost $strafe --tuned-policy $tunedPolicy --write-only 2>&1 | ForEach-Object { Write-KLog ('tuned: ' + $_) }
     } finally { $env:TEMP = $oldTemp; $env:TMP = $oldTmp }
 
-    if ($hard) { Write-Say '[6/7] Start at every logon (optimizer with admin rights, DS4Windows without)' 'Cyan' } else { Write-Say '[6/7] Start at every logon (with admin rights, as before)' 'Cyan' }
+    if ($hard) { Write-Say '[6/7] Start at every logon (optimizer with admin rights; strafe boost and DS4Windows without)' 'Cyan' } else { Write-Say '[6/7] Start at every logon (with admin rights, as before)' 'Cyan' }
     $ds4Task = 'Kpekpes DS4Windows Start'
     if ($hard) {
         # DS4Windows usually lives in Downloads / Desktop, which any program running as you can change.
         # So it gets its own task with NORMAL rights: replacing it gains an attacker nothing they did not already have.
         [void](Add-KEntry ('task|' + $ds4Task) @{ Type = 'task'; Name = $ds4Task })
         $u0 = $env:USERDOMAIN + '\' + $env:USERNAME
-        $a0 = New-ScheduledTaskAction -Execute $exe
+        # first action: write the tuned profile (strafe boost) every logon, as the normal user; second: start DS4Windows
+        $a0w = New-ScheduledTaskAction -Execute $exeDst -Argument ('--profile "' + $profile + '" --strafe-boost ' + $strafe + ' --tuned-policy ' + $tunedPolicy + ' --write-only')
+        $a0s = New-ScheduledTaskAction -Execute $exe
+        $a0 = @($a0w, $a0s)
         $tr0 = New-ScheduledTaskTrigger -AtLogOn -User $u0
         $p0 = New-ScheduledTaskPrincipal -UserId $u0 -LogonType Interactive -RunLevel Limited
         $s0 = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
         Register-ScheduledTask -TaskName $ds4Task -Action $a0 -Trigger $tr0 -Principal $p0 -Settings $s0 -Force -ErrorAction Stop | Out-Null
-    } elseif (Get-Command Test-KPathSafeForElevation -ErrorAction SilentlyContinue) {
+    } elseif ($dsMode -eq 'elevated' -and (Get-Command Test-KPathSafeForElevation -ErrorAction SilentlyContinue)) {
         $safe = Test-KPathSafeForElevation $exe
-        if (-not $safe.Safe) {
-            Write-Say ('  note: DS4Windows starts with admin rights from a place normal programs can change (' + $safe.Reason + ').') 'Yellow'
-            Write-Say '        Put DS4Windows under C:\Program Files to remove that risk, or set Controller.HardenedLogon to true in config.json.' 'Yellow'
-        }
+        if (-not $safe.Safe) { Write-Say ('  note: you forced DS4Windows to start with admin rights from a place normal programs can change (' + $safe.Reason + ').') 'Yellow' }
     }
     [void](Add-KEntry ('task|' + $script:CtlTask) @{ Type = 'task'; Name = $script:CtlTask })
     $u = $env:USERDOMAIN + '\' + $env:USERNAME

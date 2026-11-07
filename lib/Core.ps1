@@ -58,7 +58,7 @@ function Get-KDefaultConfig {
         DisableToastNotifications = $false  # OPT-IN. Can also hide Windows Security alerts
         UsePlatformTick    = $false  # OPT-IN. Unproven; measure with the Compare option first
     }
-    $ctl = [ordered]@{ DS4WindowsExe = ''; ProfileName = 'EUPHO'; StrafeBoost = 'max'; KeepAwake = 'games'; TunedProfilePolicy = 'preserve-edits'; HardenedLogon = $false }   # HardenedLogon: opt-in. $true = DS4Windows starts WITHOUT admin and the strafe boost is written once at install
+    $ctl = [ordered]@{ DS4WindowsExe = ''; ProfileName = 'EUPHO'; StrafeBoost = 'max'; KeepAwake = 'games'; TunedProfilePolicy = 'preserve-edits'; DS4Elevation = 'auto' }   # auto: DS4Windows starts with admin rights only when its files cannot be swapped by a normal account, otherwise without. elevated / normal force one way.
     $c['Controller'] = $ctl
     return $c
 }
@@ -77,6 +77,7 @@ function Get-KConfig {
                     }
                     # only known values are accepted for the choice settings
                     if (@('always', 'games', 'never') -notcontains [string]$cfg['Controller']['KeepAwake']) { $cfg['Controller']['KeepAwake'] = 'games' }
+                    if (@('auto', 'elevated', 'normal') -notcontains [string]$cfg['Controller']['DS4Elevation']) { $cfg['Controller']['DS4Elevation'] = 'auto' }
                     if (@('overwrite', 'preserve-edits') -notcontains [string]$cfg['Controller']['TunedProfilePolicy']) { $cfg['Controller']['TunedProfilePolicy'] = 'preserve-edits' }
                 } elseif ($null -ne $f.$k) {
                     $cfg[$k] = [bool]$f.$k
