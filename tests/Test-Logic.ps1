@@ -257,7 +257,7 @@ Assert-That 'launcher has no hard-coded DS4Windows start (it is built per mode)'
 $ctlSrc = (Get-Command Install-Controller).ScriptBlock.ToString()
 Assert-That 'DS4Windows gets its own NON-elevated logon task' ($ctlSrc -match "Kpekpes DS4Windows Start" -and $ctlSrc -match 'RunLevel Limited')
 Assert-That 'tuned profile is also written at install with --write-only' ($ctlSrc -match '--write-only')
-Assert-That 'DS4Elevation defaults to auto and the boost is written at every logon in both modes' ((Get-KDefaultConfig).Controller.DS4Elevation -eq 'auto' -and $ctlSrc -match "'--strafe-boost ' \+ \$strafe" -and $ctlSrc -match '--write-only')
+Assert-That 'DS4Elevation defaults to auto and the boost is written at every logon in both modes' (((Get-KDefaultConfig).Controller.DS4Elevation -eq 'auto') -and $ctlSrc.Contains('--strafe-boost') -and $ctlSrc.Contains('--write-only') -and $ctlSrc.Contains('--tuned-policy'))
 Assert-That 'no placeholder left after generation' (-not $gen.Contains('@@'))
 Assert-That 'bat keeps the duplicate-run guard' ($gen -match "Name -eq 'KpekpesPCOptimizer\.exe'")
 Assert-That 'bat starts the program by its full path, not PATH lookup' ($gen -match '(?m)^"C:\\ProgramData\\KpekpesCODCustom\\controller\\bin\\KpekpesPCOptimizer\.exe" --profile' -and -not ($gen -match '(?i)python'))
