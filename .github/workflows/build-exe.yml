@@ -1,13 +1,13 @@
 name: build-exe
 
 # Builds controller\KpekpesPCOptimizer.exe on a real Windows machine, so no Python is ever needed on your own PC.
-# Run it by hand: Actions tab -> build-exe -> Run workflow. Pushing a tag like v1.2.0 also attaches the files to a Release.
+# Run it by hand: Actions tab -> build-exe -> Run workflow. Pushing a tag like v1.3.0 also attaches the files to a Release.
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Optional: attach the files to this release tag (for example v1.2.1)'
+        description: 'Optional: attach the files to this release tag (for example v1.3.0)'
         required: false
         default: ''
   push:
@@ -64,8 +64,8 @@ jobs:
             CompanyName      = 'Jesus Kpekpes'
             FileDescription  = 'Controller input optimizer'
             ProductName      = 'Kpekpes PC Optimizer'
-            FileVersion      = '1.2.1.0'
-            ProductVersion   = '1.2.1.0'
+            FileVersion      = '1.3.0.0'
+            ProductVersion   = '1.3.0.0'
             OriginalFilename = 'KpekpesPCOptimizer.exe'
           }
           $bad = 0

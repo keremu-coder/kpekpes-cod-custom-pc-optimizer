@@ -1,15 +1,17 @@
-# Changes in 1.3.0 (proposed: audit fixes + measurement maths)
+# Changes in 1.3.0
 
 The logic behind these changes is checked by `tests/Test-Logic.ps1` (120 checks) and the new `tests/Test-Stats.ps1` (53 checks).
 Both suites pass under PowerShell 7. The Windows-only parts (ACL checks, CPU probe, scheduled tasks, the seeded
 round trip) parse cleanly but must be confirmed by `windows-test.yml` on a real Windows runner.
 
 ## Security fixes
-- **No elevated task launches DS4Windows any more.** The elevated controller bat only boosts DS4Windows; DS4Windows
-  itself is started by a new NON-elevated logon task `Kpekpes DS4Windows Start`. Before, replacing `DS4Windows.exe`
-  in Downloads/Desktop (no admin needed) gave silent admin rights at the next logon.
-- **The tuned profile is written once at install** (`--write-only`), not by the elevated logon task into a
-  user-writable profile folder.
+- **DS4Windows starts with admin rights only when nobody but an administrator can replace it.** If DS4Windows and its
+  profile folder sit in an admin-only place (for example `C:\Program Files\DS4Windows`) it starts with admin rights, as
+  before. Otherwise it starts WITHOUT admin rights, from a normal logon task. Before, replacing `DS4Windows.exe` in
+  Downloads/Desktop (no admin needed) gave silent admin rights at the next logon. `Controller.DS4Elevation` in
+  `config.json` can force `elevated` or `normal`; the default is `auto`.
+- **The strafe boost is written at every logon, as before.** With admin rights when the files are admin-only, otherwise by the
+  same normal logon task. It is also written once at install.
 - **Defender exclusions only for folders a normal account cannot change** (`lib/Safety.ps1`: trusted owner, no
   write rights for non-admins, no junctions, checked up to the drive root). `%LOCALAPPDATA%\Battle.net`, Downloads
   and user-writable Steam libraries are reported as "not excluded" instead of silently excluded.

@@ -116,7 +116,8 @@ The controller optimizer is installed from the `controller\` folder and runs in 
 - Sets the profile's Launch Program to the hidden launcher and writes `<profile>_tuned.xml` with the strafe boost
   (`max` = anti-deadzone 16%, max zone 40%, **left stick X only**). The right stick and the curves are untouched.
   **Select the `_tuned` profile in DS4Windows to use it.**
-- Installs the optimizer into a protected folder and starts them hidden, elevated, at every logon through a scheduled task.
+- Installs the optimizer into a protected folder and starts it hidden, with admin rights, at every logon through a scheduled task.
+- Starts DS4Windows at logon: with admin rights when it lives in an admin-only folder (such as `C:\Program Files`), otherwise without, so a normal program cannot swap it for something that then runs as admin. The strafe boost is applied at every logon either way.
   The folder is read-only for normal users, because the task runs with admin rights.
 - Raises DS4Windows to High priority, turns off power throttling for it, and holds the timer at its finest resolution.
 - Verify checks: one optimizer running, DS4Windows priority, tuned profile values, task registered and elevated.
