@@ -34,6 +34,9 @@ Assert-That 'Binary inequality' (-not (Test-RegValueEquals ([byte[]](1, 2, 3)) (
 Assert-That 'String equality ignores case' (Test-RegValueEquals 'High' 'high' 'String')
 Assert-That 'null never equals' (-not (Test-RegValueEquals $null 1 'DWord'))
 
+Write-Host 'DWord conversion safety'
+Assert-That 'text where a number is expected does not crash and does not match' ((Test-RegValueEquals 'kpk1' 1 'DWord') -eq $false)
+Assert-That 'a number where bytes are expected does not crash and does not match' ((Test-RegValueEquals 5 ([byte[]]@(1,2)) 'Binary') -eq $false)
 Write-Host 'Score'
 $res = @(
     (New-KResult 'a' 'PASS'), (New-KResult 'b' 'PASS'), (New-KResult 'c' 'FAIL'),

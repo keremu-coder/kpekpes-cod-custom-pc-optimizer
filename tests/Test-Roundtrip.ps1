@@ -283,7 +283,11 @@ function Invoke-Scenario {
     $mid = Get-Snapshot $snapCfg
     $changed = Get-DiffCount $before $mid
     Write-Host ('  apply changed ' + $changed + ' items') -ForegroundColor Gray
-    if ($changed -lt 20) { Add-Fail ('Optimize changed only ' + $changed + ' items - it probably did not run') }
+    if ($changed -lt 20) {
+        Add-Fail ('Optimize changed only ' + $changed + ' items - it probably did not run')
+        Write-Host '--- last lines of the Optimize output ---' -ForegroundColor Yellow
+        (($a.Output -split "`r?`n") | Select-Object -Last 25) | ForEach-Object { Write-Host ('  ' + $_) }
+    }
 
     $types = Get-JournalTypes
     $histo = @($types.Keys | Sort-Object | ForEach-Object { $_ + '=' + $types[$_] }) -join '  '

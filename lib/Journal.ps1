@@ -119,10 +119,13 @@ function ConvertTo-JsonSafe {
 function Test-RegValueEquals {
     param($Actual, $Expected, [string]$Kind)
     if ($null -eq $Actual) { return $false }
-    if ($Kind -eq 'DWord') { return ((ConvertTo-RegInt $Actual) -eq (ConvertTo-RegInt $Expected)) }
-    if ($Kind -eq 'QWord') { return ([int64]$Actual -eq [int64]$Expected) }
-    if ($Kind -eq 'Binary') { return (([BitConverter]::ToString([byte[]]$Actual)) -eq ([BitConverter]::ToString([byte[]]$Expected))) }
-    return (([string]$Actual) -ieq ([string]$Expected))
+    # A value of the wrong type (for example text where a number is expected) simply does not match; it must never stop the run.
+    try {
+        if ($Kind -eq 'DWord') { return ((ConvertTo-RegInt $Actual) -eq (ConvertTo-RegInt $Expected)) }
+        if ($Kind -eq 'QWord') { return ([int64]$Actual -eq [int64]$Expected) }
+        if ($Kind -eq 'Binary') { return (([BitConverter]::ToString([byte[]]$Actual)) -eq ([BitConverter]::ToString([byte[]]$Expected))) }
+        return (([string]$Actual) -ieq ([string]$Expected))
+    } catch { return $false }
 }
 
 function Register-NewKeys {
