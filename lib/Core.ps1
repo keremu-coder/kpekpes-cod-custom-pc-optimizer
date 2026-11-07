@@ -52,7 +52,7 @@ function Get-KDefaultConfig {
         RemoveXboxApps     = $true   # Game Bar / Xbox overlay apps
         DisableServices    = $true   # SysMain, DiagTrack, WSearch and friends
         HvciOff            = $false  # OPT-IN. Memory integrity / VBS / hypervisor off (lowers security, breaks WSL2/Hyper-V)
-        GameModeOff        = $false  # OPT-IN. Windows' Game Mode stays ON unless an A/B test on your PC says off is better (never off on dual-CCD X3D)
+        GameModeOff        = $true   # Game Mode off, as before (never on dual-CCD X3D chips: AMD's V-Cache driver relies on it)
         LogonReapply       = $true   # re-apply the PC tweaks at every logon
         ReapplyUserPreferences = $false  # logon re-apply also resets mouse / visual / input choices (off = leaves them alone)
         DisableToastNotifications = $false  # OPT-IN. Can also hide Windows Security alerts

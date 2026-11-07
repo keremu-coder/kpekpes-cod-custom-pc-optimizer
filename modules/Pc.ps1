@@ -133,7 +133,7 @@ function Get-PcRegTweaks {
     Add-RT $g 'Hardware GPU scheduling on' $gfx 'HwSchMode' 2
     Add-RT $g 'MPO disabled (OverlayTestMode = 5)' 'HKLM:\SOFTWARE\Microsoft\Windows\Dwm' 'OverlayTestMode' 5
     if ($Cfg.GameModeOff) {
-        # opt-in, and never on dual-CCD X3D chips: AMD's V-Cache driver relies on Game Mode
+        # on by default as before, but never on dual-CCD X3D chips: AMD's V-Cache driver relies on Game Mode
         $gmOk = $true
         try { if (Get-Command Get-PcCpuPolicy -ErrorAction SilentlyContinue) { $gmOk = -not (Get-PcCpuPolicy).Kind.Equals('dual-ccd-x3d') } } catch { }
         if ($gmOk) {

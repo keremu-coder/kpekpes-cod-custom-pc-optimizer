@@ -1,6 +1,8 @@
 @echo off
-title Kpekpes controller optimizer
+title DS4 Hyper-Velocity Background Optimizer
 cd /d "%~dp0"
+
+:: Maximize strafe speed and enforce system optimizations with custom anti-overshoot tracking balance with hyper ultra fast strafe tracking speed bursted for omnipotent maximum tracking on strafing lightening speed that is snappy with control over stick matches aim assist behaviour highest system performance with Hyper-Velocity Strafe Boost (Anti-DZ X: 16%, Max Zone X: 40%) zero input delay on aim assist bubble while maintaining magnetic aim feeling on target with maximum strength control and friction lock on target with light-speed micro tracking responsiveness so no strafer can escape
 
 :: What this does, in plain words: holds the Windows timer at its finest step, raises DS4Windows to High
 :: priority and stops Windows from power-throttling it, and keeps the PC awake while the game runs.

@@ -147,7 +147,7 @@ Assert-That '7800X3D (one CCD): parking left to Windows, Game Bar may go' ($y.Ki
 $z = Get-KCpuPolicy 'AMD Ryzen 9 5900X 12-Core Processor' 2
 Assert-That '5900X (two CCDs, no X3D): parking may be disabled' ($z.Kind -eq 'standard' -and $z.DisableParking)
 $w = Get-KCpuPolicy '13th Gen Intel(R) Core(TM) i7-13700K' 1
-Assert-That 'Intel: standard policy, Game Mode left on' ($w.Kind -eq 'standard' -and -not $w.GameModeOff)
+Assert-That 'Intel: standard policy, Game Mode off as before' ($w.Kind -eq 'standard' -and $w.GameModeOff)
 
 Write-Host ''
 Write-Host ('{0} passed, {1} failed' -f $script:pass, $script:fail)

@@ -20,7 +20,7 @@ round trip) parse cleanly but must be confirmed by `windows-test.yml` on a real 
 - Exact CCD count from the L3 caches (`lib/Topology.ps1`) replaces "8 cores or fewer = single CCD".
 - On dual-CCD X3D chips (7900X3D / 7950X3D / 9900X3D / 9950X3D) core parking, Game Mode and Game Bar are kept:
   AMD's V-Cache driver needs all three.
-- Game Mode is now left at the Windows default. `GameModeOff` (opt-in) turns it off, never on dual-CCD X3D.
+- Game Mode stays off as before, except on dual-CCD X3D chips, where it is left alone.
 
 ## Undo
 - Registry entries record what the tool wrote; Undo reports values changed afterwards by you or Windows ("drift").

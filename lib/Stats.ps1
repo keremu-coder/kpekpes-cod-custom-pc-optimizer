@@ -287,7 +287,7 @@ function Get-KCpuPolicy {
     $p = [ordered]@{
         Kind              = 'standard'
         DisableParking    = $true
-        GameModeOff       = $false   # Windows default (on) until an A/B test on THIS PC shows off is better
+        GameModeOff       = $true    # off, as before; dual-CCD X3D is the exception below
         RemoveGameBar     = $true
         Reason            = ''
     }

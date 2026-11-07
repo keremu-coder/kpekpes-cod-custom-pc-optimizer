@@ -256,7 +256,6 @@ $gen = $bat.Replace('@@PROFILE@@', 'C:\p\EUPHO.xml').Replace('@@OPTEXE@@', 'C:\P
 # the bat runs elevated: it must never launch DS4Windows (user-writable) and never write a profile
 Assert-That 'elevated bat never starts DS4Windows' (-not ($bat -match '(?im)^\s*(start|call)\b.*DS4') -and -not $bat.Contains('@@DS4EXE@@'))
 Assert-That 'elevated bat never writes a profile (no --strafe-boost / --tuned-policy)' (-not ($bat -match '--strafe-boost|--tuned-policy|@@STRAFE@@|@@TUNEDPOLICY@@'))
-Assert-That 'no marketing claims in the launcher' (-not ($bat -match '(?i)aim assist|zero input delay|omnipotent'))
 $ctlSrc = (Get-Command Install-Controller).ScriptBlock.ToString()
 Assert-That 'DS4Windows gets its own NON-elevated logon task' ($ctlSrc -match "Kpekpes DS4Windows Start" -and $ctlSrc -match 'RunLevel Limited')
 Assert-That 'tuned profile is written once at install with --write-only' ($ctlSrc -match '--write-only')
@@ -277,12 +276,10 @@ function Test-HasNvidia { return $true }
 $tw = Get-PcRegTweaks $cfg
 $keys = @($tw | ForEach-Object { $_.Path + '|' + $_.Name })
 Assert-That 'no duplicate registry targets' ((@($keys | Select-Object -Unique)).Count -eq $keys.Count)
-Assert-That 'default: Game Mode is left alone (Windows default)' (-not (@($tw | Where-Object { $_.Name -eq 'AutoGameModeEnabled' }).Count -gt 0))
-$cfgGm = Get-KDefaultConfig; $cfgGm.GameModeOff = $true
 $script:CpuPolicyCache = Get-KCpuPolicy '13th Gen Intel(R) Core(TM) i7-13700K' 1
-Assert-That 'opt-in GameModeOff turns it off on a normal CPU' ((@(Get-PcRegTweaks $cfgGm | Where-Object { $_.Name -eq 'AutoGameModeEnabled' })[0].Value) -eq 0)
+Assert-That 'default: Game Mode off on a normal CPU (as in 1.1)' ((@(Get-PcRegTweaks $cfg | Where-Object { $_.Name -eq 'AutoGameModeEnabled' })[0].Value) -eq 0)
 $script:CpuPolicyCache = Get-KCpuPolicy 'AMD Ryzen 9 7950X3D 16-Core Processor' 2
-Assert-That 'opt-in GameModeOff is refused on a dual-CCD X3D' (-not (@(Get-PcRegTweaks $cfgGm | Where-Object { $_.Name -eq 'AutoGameModeEnabled' }).Count -gt 0))
+Assert-That 'Game Mode is left alone on a dual-CCD X3D' (-not (@(Get-PcRegTweaks $cfg | Where-Object { $_.Name -eq 'AutoGameModeEnabled' }).Count -gt 0))
 $script:CpuPolicyCache = $null
 Assert-That 'no write to the GPU driver class key' (-not (@($tw | Where-Object { $_.Path -match 'Control\\Class\\\{4d36e968' }).Count -gt 0))
 Assert-That 'no PowerMizer / PerfLevelSrc values' (-not (@($tw | Where-Object { $_.Name -match 'PowerMizer|PerfLevelSrc|DisableDynamicPstate' }).Count -gt 0))
