@@ -58,7 +58,7 @@ function Get-KDefaultConfig {
         DisableToastNotifications = $false  # OPT-IN. Can also hide Windows Security alerts
         UsePlatformTick    = $false  # OPT-IN. Unproven; measure with the Compare option first
     }
-    $ctl = [ordered]@{ DS4WindowsExe = ''; ProfileName = 'EUPHO'; StrafeBoost = 'max'; KeepAwake = 'games'; TunedProfilePolicy = 'preserve-edits' }
+    $ctl = [ordered]@{ DS4WindowsExe = ''; ProfileName = 'EUPHO'; StrafeBoost = 'max'; KeepAwake = 'games'; TunedProfilePolicy = 'preserve-edits'; HardenedLogon = $false }   # HardenedLogon: opt-in. $true = DS4Windows starts WITHOUT admin and the strafe boost is written once at install
     $c['Controller'] = $ctl
     return $c
 }

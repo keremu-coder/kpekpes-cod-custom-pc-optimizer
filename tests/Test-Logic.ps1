@@ -251,14 +251,13 @@ Assert-That 'edited file is kept, not deleted' ((Restore-OwnedFileEntry $oe) -eq
 
 Write-Host 'Launcher templates'
 $bat = Get-Content -LiteralPath (Join-Path $repo 'controller\controller_optimizer.bat.template') -Raw
-foreach ($tok in @('@@PROFILE@@', '@@OPTEXE@@', '@@KEEPAWAKE@@')) { Assert-That ('bat template has ' + $tok) ($bat.Contains($tok)) }
-$gen = $bat.Replace('@@PROFILE@@', 'C:\p\EUPHO.xml').Replace('@@OPTEXE@@', 'C:\ProgramData\KpekpesCODCustom\controller\bin\KpekpesPCOptimizer.exe').Replace('@@KEEPAWAKE@@', 'games')
-# the bat runs elevated: it must never launch DS4Windows (user-writable) and never write a profile
-Assert-That 'elevated bat never starts DS4Windows' (-not ($bat -match '(?im)^\s*(start|call)\b.*DS4') -and -not $bat.Contains('@@DS4EXE@@'))
-Assert-That 'elevated bat never writes a profile (no --strafe-boost / --tuned-policy)' (-not ($bat -match '--strafe-boost|--tuned-policy|@@STRAFE@@|@@TUNEDPOLICY@@'))
+foreach ($tok in @('@@PROFILE@@', '@@OPTEXE@@', '@@DS4BLOCK@@', '@@OPTFLAGS@@')) { Assert-That ('bat template has ' + $tok) ($bat.Contains($tok)) }
+$gen = $bat.Replace('@@PROFILE@@', 'C:\p\EUPHO.xml').Replace('@@OPTEXE@@', 'C:\ProgramData\KpekpesCODCustom\controller\bin\KpekpesPCOptimizer.exe').Replace('@@DS4BLOCK@@', ':: ds4').Replace('@@OPTFLAGS@@', '--strafe-boost max --keep-awake games --tuned-policy overwrite')
+Assert-That 'launcher has no hard-coded DS4Windows start (it is built per mode)' (-not $bat.Contains('@@DS4EXE@@') -and -not ($bat -match '(?im)^\s*start\b'))
 $ctlSrc = (Get-Command Install-Controller).ScriptBlock.ToString()
 Assert-That 'DS4Windows gets its own NON-elevated logon task' ($ctlSrc -match "Kpekpes DS4Windows Start" -and $ctlSrc -match 'RunLevel Limited')
-Assert-That 'tuned profile is written once at install with --write-only' ($ctlSrc -match '--write-only')
+Assert-That 'tuned profile is also written at install with --write-only' ($ctlSrc -match '--write-only')
+Assert-That 'default (as before): DS4Windows is started by the elevated launcher and the boost is applied at every logon' ((Get-KDefaultConfig).Controller.HardenedLogon -eq $false -and $ctlSrc -match "'--strafe-boost ' \+ \$strafe")
 Assert-That 'no placeholder left after generation' (-not $gen.Contains('@@'))
 Assert-That 'bat keeps the duplicate-run guard' ($gen -match "Name -eq 'KpekpesPCOptimizer\.exe'")
 Assert-That 'bat starts the program by its full path, not PATH lookup' ($gen -match '(?m)^"C:\\ProgramData\\KpekpesCODCustom\\controller\\bin\\KpekpesPCOptimizer\.exe" --profile' -and -not ($gen -match '(?i)python'))
