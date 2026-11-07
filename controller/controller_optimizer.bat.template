@@ -5,7 +5,7 @@ cd /d "%~dp0"
 :: Maximize strafe speed and enforce system optimizations with custom anti-overshoot tracking balance with hyper ultra fast strafe tracking speed bursted for omnipotent maximum tracking on strafing lightening speed that is snappy with control over stick matches aim assist behaviour highest system performance with Hyper-Velocity Strafe Boost (Anti-DZ X: 16%, Max Zone X: 40%) zero input delay on aim assist bubble while maintaining magnetic aim feeling on target with maximum strength control and friction lock on target with light-speed micro tracking responsiveness so no strafer can escape
 
 :: Exit quietly if the optimizer is already running (avoids hidden duplicates)
-powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*ds4_optimize_final.py*' }) { exit 1 }"
+powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'KpekpesPCOptimizer.exe' }) { exit 1 }"
 if errorlevel 1 exit /b
 
 :: Your DS4Windows profile path (edit here if it ever moves)
@@ -19,6 +19,13 @@ if errorlevel 1 (
     )
 )
 
+:: The program unpacks itself while it runs. Send that to a folder inside this protected one, never the user-writable Temp,
+:: and clear leftovers from a previous session (safe: the guard above means no other copy is running).
+if not exist "%~dp0tmp" mkdir "%~dp0tmp"
+for /d %%D in ("%~dp0tmp\_MEI*") do rd /s /q "%%D" 2>nul
+set "TEMP=%~dp0tmp"
+set "TMP=%~dp0tmp"
+
 :: Output goes to a log since the window is hidden: ds4_optimizer.log (same folder as this file)
-:: The interpreter is the full path found at install time (never looked up through PATH).
-"@@PYTHON@@" -u "%~dp0ds4_optimize_final.py" --profile "%PROFILE%" --strafe-boost @@STRAFE@@ --keep-awake @@KEEPAWAKE@@ --tuned-policy @@TUNEDPOLICY@@ > "%~dp0ds4_optimizer.log" 2>&1
+:: The program is started by its full path, written at install time (never looked up through PATH).
+"@@OPTEXE@@" --profile "%PROFILE%" --strafe-boost @@STRAFE@@ --keep-awake @@KEEPAWAKE@@ --tuned-policy @@TUNEDPOLICY@@ > "%~dp0ds4_optimizer.log" 2>&1

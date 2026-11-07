@@ -1,9 +1,15 @@
-# Kpekpes COD Custom PC Optimizer
+<p align="center">
+  <img src="assets/logo.png" alt="Kpekpes COD Custom PC Optimizer" width="360">
+</p>
 
-**By Jesus Kpekpes**
+<h1 align="center">Kpekpes COD Custom PC Optimizer</h1>
 
-A maximum-performance Windows setup for Call of Duty on PC, plus a DS4Windows controller optimizer.
-Both parts keep a journal of every change they make, so each one can be undone on its own.
+<p align="center"><b>By Jesus Kpekpes</b></p>
+
+<p align="center">
+A maximum-performance Windows setup for Call of Duty on PC, plus a DS4Windows controller optimizer.<br>
+Every change is journaled, so each part can be undone on its own.
+</p>
 
 ---
 
@@ -18,7 +24,7 @@ Run either one, or both one after the other (PC first, then Controller). Undo is
 
 ## Quick start
 
-1. Download the ZIP and extract the whole folder.
+1. Download **Kpekpes-ready-to-run.zip** from the latest [Release](../../releases) and extract the whole folder.
 2. Run **`Run_Kpekpes.bat`**. It opens the menu in an Administrator window.
 3. Pick **1** (PC), **2** (Controller) or **3** (both).
 4. Restart Windows once.
@@ -104,13 +110,13 @@ maximum performance**. A script cannot read back or undo per-app driver profiles
 
 ## Controller module
 
-Wraps the DS4Windows optimizer script in `controller\`. It needs **Python 3** (the installer offers to install it with winget).
+The controller optimizer is installed from the `controller\` folder and runs in the background as **`KpekpesPCOptimizer.exe`**.
 
 - Finds DS4Windows, keeps **your** profile as it is (the bundled `EUPHO.xml` is only copied if the profile is missing).
 - Sets the profile's Launch Program to the hidden launcher and writes `<profile>_tuned.xml` with the strafe boost
   (`max` = anti-deadzone 16%, max zone 40%, **left stick X only**). The right stick and the curves are untouched.
   **Select the `_tuned` profile in DS4Windows to use it.**
-- Installs the scripts into a protected folder and starts them hidden, elevated, at every logon through a scheduled task.
+- Installs the optimizer into a protected folder and starts them hidden, elevated, at every logon through a scheduled task.
   The folder is read-only for normal users, because the task runs with admin rights.
 - Raises DS4Windows to High priority, turns off power throttling for it, and holds the timer at its finest resolution.
 - Verify checks: one optimizer running, DS4Windows priority, tuned profile values, task registered and elevated.
@@ -120,7 +126,6 @@ Settings in `config.json` under `Controller`:
 - `"StrafeBoost": "mild" | "strong" | "max"`
 - `"KeepAwake": "games" | "always" | "never"` - `games` (default) holds the PC awake only while cod.exe is running; `always` is the old behaviour.
 - `"TunedProfilePolicy": "preserve-edits" | "overwrite"` - `preserve-edits` (default) never overwrites a `_tuned.xml` you edited; `overwrite` is the old behaviour.
-- `"AllowUserWritablePython": false` - the elevated task refuses a Python that normal users can edit. Install one for all users: `winget install -e --id Python.Python.3.12 --scope machine`.
 
 ---
 
@@ -141,10 +146,11 @@ Settings in `config.json` under `Controller`:
 | `Kpekpes.ps1` | Menu and command line |
 | `lib\Core.ps1`, `lib\Journal.ps1`, `lib\Checks.ps1` | Config, undo journal, readiness checks, frame comparison |
 | `modules\Pc.ps1`, `modules\Controller.ps1` | The two modules |
-| `controller\` | DS4 optimizer script, launcher templates, default profile |
+| `controller\` | Controller optimizer, launcher templates, default profile |
 | `tests\Test-Logic.ps1` | Tests for the logic that does not need Windows (`pwsh tests/Test-Logic.ps1`) |
 | `tests\Test-Roundtrip.ps1` | Real-Windows round trip (GitHub Actions only): snapshot, optimize, undo, compare |
 | `.github\workflows\windows-test.yml` | The GitHub Actions test |
+| `.github\workflows\build-exe.yml` | Builds the controller optimizer program |
 
 ## Disclaimer
 

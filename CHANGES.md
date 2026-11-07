@@ -15,14 +15,12 @@ Nothing was removed. Everything that worked still works; new behaviour is behind
 - `ReapplyUserPreferences` default `false`: logon re-apply skips the mouse / visual / input group. (point 8)
 - `Controller.KeepAwake` default `games` (`always` = old behaviour, `never`). (point 5)
 - `Controller.TunedProfilePolicy` default `preserve-edits` (`overwrite` = old behaviour). (point 6)
-- `Controller.AllowUserWritablePython` default `false`. (point 3)
 
 To get exactly the old behaviour back, put this in `C:\ProgramData\KpekpesCODCustom\config.json`:
-`{ "HvciOff": true, "DisableToastNotifications": true, "UsePlatformTick": true, "ReapplyUserPreferences": true, "Controller": { "KeepAwake": "always", "TunedProfilePolicy": "overwrite", "AllowUserWritablePython": true } }`
+`{ "HvciOff": true, "DisableToastNotifications": true, "UsePlatformTick": true, "ReapplyUserPreferences": true, "Controller": { "KeepAwake": "always", "TunedProfilePolicy": "overwrite" } }`
 
 ## Controller module
-- Stores the FULL Python path in the launcher (no PATH lookup); refuses a user-writable Python for the elevated task; offers `winget --scope machine`. (point 3)
-- `ds4_optimize_final.py`: two added flags, `--keep-awake` and `--tuned-policy`. Defaults in the script itself are the old behaviour (`always`, `overwrite`), so running it by hand is unchanged. Everything else is byte-for-byte the same code.
+- Controller optimizer: two added flags, `--keep-awake` and `--tuned-policy`. Defaults in the script itself are the old behaviour (`always`, `overwrite`), so running it by hand is unchanged. Everything else is byte-for-byte the same code.
 - Tuned profile: a hash file (`.kpekpes-sha256`) remembers what the script wrote; an edited file is never overwritten, and Undo deletes it only if unedited.
 
 ## Tests / CI

@@ -1,0 +1,120 @@
+name: build-exe
+
+# Builds controller\KpekpesPCOptimizer.exe on a real Windows machine, so no Python is ever needed on your own PC.
+# Run it by hand: Actions tab -> build-exe -> Run workflow. Pushing a tag like v1.2.0 also attaches the files to a Release.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # only used to attach files to a Release on tag pushes
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 0. If the project was uploaded as one zip file, unpack it here
+        run: |
+          if (-not (Test-Path '.\controller\ds4_optimize_final.py')) {
+            $zip = Get-ChildItem -Path . -Filter *.zip -File | Where-Object { $_.Name -match 'Kpekpes' } | Select-Object -First 1
+            if (-not $zip) { Write-Host 'No controller folder and no Kpekpes zip at the top of the repo.'; exit 1 }
+            Expand-Archive -LiteralPath $zip.FullName -DestinationPath .\unz -Force
+            $hit = Get-ChildItem -Path .\unz -Recurse -Filter Kpekpes.ps1 | Select-Object -First 1
+            if (-not $hit) { Write-Host 'Kpekpes.ps1 not found inside the zip'; exit 1 }
+            Get-ChildItem -Path $hit.DirectoryName -Force | Copy-Item -Destination . -Recurse -Force
+            Remove-Item .\unz -Recurse -Force
+          }
+          if (-not (Test-Path '.\controller\ds4_optimize_final.py')) { Write-Host 'controller\ds4_optimize_final.py not found'; exit 1 }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 1. Install PyInstaller (pinned version)
+        run: python -m pip install pyinstaller==6.11.1
+
+      - name: 2. Build the single-file program with its version resource
+        run: |
+          python -m PyInstaller --onefile --clean --noconfirm `
+            --name KpekpesPCOptimizer `
+            --version-file controller\version_info.txt `
+            --icon assets\icon.ico `
+            --distpath dist --workpath build --specpath build `
+            controller\ds4_optimize_final.py
+          if (-not (Test-Path dist\KpekpesPCOptimizer.exe)) { Write-Host 'build produced no exe'; exit 1 }
+
+      - name: 3. Check the version resource is really inside the exe
+        run: |
+          $vi = (Get-Item dist\KpekpesPCOptimizer.exe).VersionInfo
+          $want = @{
+            CompanyName      = 'Jesus Kpekpes'
+            FileDescription  = 'Controller input optimizer'
+            ProductName      = 'Kpekpes PC Optimizer'
+            FileVersion      = '1.2.0.0'
+            ProductVersion   = '1.2.0.0'
+            OriginalFilename = 'KpekpesPCOptimizer.exe'
+          }
+          $bad = 0
+          foreach ($k in $want.Keys) {
+            $got = [string]$vi.$k
+            if ($got -eq $want[$k]) { Write-Host ('ok   ' + $k + ' = ' + $got) } else { $bad++; Write-Host ('FAIL ' + $k + ': wanted "' + $want[$k] + '" got "' + $got + '"') }
+          }
+          if (-not ([string]$vi.LegalCopyright).Contains('Kpekpes')) { $bad++; Write-Host ('FAIL LegalCopyright = "' + $vi.LegalCopyright + '"') } else { Write-Host ('ok   LegalCopyright = ' + $vi.LegalCopyright) }
+          if ($bad -gt 0) { exit 1 }
+
+      - name: 4. Smoke test - the exe starts and offers every flag (--help only, nothing is changed)
+        timeout-minutes: 3
+        run: |
+          $p = Start-Process -FilePath .\dist\KpekpesPCOptimizer.exe -ArgumentList '--help' -NoNewWindow -PassThru -RedirectStandardOutput help.txt -RedirectStandardError help.err
+          if (-not $p.WaitForExit(60000)) { try { $p.Kill() } catch { }; Write-Host 'exe did not exit'; exit 1 }
+          $t = (Get-Content help.txt -Raw) + (Get-Content help.err -Raw)
+          Write-Host $t
+          $bad = 0
+          foreach ($f in @('--profile', '--strafe-boost', '--keep-awake', '--tuned-policy', 'always', 'games', 'never', 'overwrite', 'preserve-edits')) {
+            if ($t -notmatch [regex]::Escape($f)) { $bad++; Write-Host ('FAIL missing in --help: ' + $f) }
+          }
+          if ($p.ExitCode -ne 0) { $bad++; Write-Host ('FAIL exit code ' + $p.ExitCode) }
+          if ($bad -gt 0) { exit 1 }
+
+      - name: 5. Fingerprint and package
+        run: |
+          $h = (Get-FileHash dist\KpekpesPCOptimizer.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path dist\KpekpesPCOptimizer.exe.sha256 -Value ($h + '  KpekpesPCOptimizer.exe') -Encoding ascii
+          Write-Host ('SHA-256 ' + $h)
+          # the whole tool with the exe already in controller\, ready to unzip and run
+          New-Item -ItemType Directory -Path pkg\Kpekpes | Out-Null
+          Get-ChildItem -Force | Where-Object { $_.Name -notin @('.git', '.github', 'dist', 'build', 'pkg') -and $_.Extension -ne '.zip' } | Copy-Item -Destination pkg\Kpekpes -Recurse -Force
+          Copy-Item dist\KpekpesPCOptimizer.exe pkg\Kpekpes\controller\ -Force
+          Compress-Archive -Path pkg\Kpekpes -DestinationPath dist\Kpekpes-ready-to-run.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kpekpes-ready-to-run
+          path: dist/Kpekpes-ready-to-run.zip
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KpekpesPCOptimizer-exe
+          path: |
+            dist/KpekpesPCOptimizer.exe
+            dist/KpekpesPCOptimizer.exe.sha256
+          if-no-files-found: error
+
+      - name: 6. Attach to a GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/KpekpesPCOptimizer.exe
+            dist/KpekpesPCOptimizer.exe.sha256
+            dist/Kpekpes-ready-to-run.zip

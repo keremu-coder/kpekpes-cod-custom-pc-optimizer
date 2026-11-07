@@ -1,6 +1,7 @@
 # Controller.ps1 -- DS4Windows controller module.
 #
-# Wraps the proven DS4 optimizer (controller\ds4_optimize_final.py, unchanged):
+# Wraps the proven DS4 optimizer (controller\ds4_optimize_final.py, packaged as the single program
+# KpekpesPCOptimizer.exe by .github\workflows\build-exe.yml; no Python is needed on this PC):
 #   * holds the Windows timer at its finest setting while you play,
 #   * raises DS4Windows to High priority and turns off power throttling for it,
 #   * writes <profile>_tuned.xml with the strafe boost (left stick X only, right stick never touched).
@@ -11,6 +12,7 @@ $script:CtlTask    = 'Kpekpes Controller Optimizer'
 $script:CtlOldTask = 'DS4 Optimizer'
 $script:Strafe     = @{ mild = @(6, 52); strong = @(10, 48); max = @(16, 40) }
 $script:Silent     = $false
+$script:CtlExeName = 'KpekpesPCOptimizer.exe'
 
 function Get-CtlDirs {
     $base = Join-Path $script:DataRoot 'controller'
@@ -40,103 +42,6 @@ function Get-DS4ProfilesDir {
     $p2 = Join-Path $env:APPDATA 'DS4Windows\Profiles'
     if (Test-Path -LiteralPath $p2) { return $p2 }
     return $p1
-}
-
-function Test-PythonWorks {
-    param([string]$Exe, [string[]]$ExtraArgs)
-    try {
-        $o = (& $Exe @ExtraArgs 2>&1 | Out-String)
-        return ($o -match 'Python 3')
-    } catch { return $false }
-}
-
-# ---------------- Python: full path + "is it safe to run elevated?" ----------------
-# The logon task runs with admin rights. If it ran a Python that normal users can edit (a per-user install),
-# anything running as you could swap that python.exe and get admin. So the interpreter is stored as a FULL path,
-# and a user-writable one is refused unless Controller.AllowUserWritablePython is set in config.json.
-
-$script:AceSafeSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-3-0', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
-
-function Test-AceUnsafe {
-    # True if this access rule lets a non-administrator change or replace the thing it protects.
-    # Strict = the file itself or the folder it sits in (any write counts).
-    # Not strict = a parent folder (only rights that can delete or replace the child count; plain "create" does not).
-    param([string]$Sid, [int64]$Rights, [string]$Type, [bool]$InheritOnly = $false, [bool]$Strict = $true)
-    if ($Type -ne 'Allow') { return $false }
-    if ($InheritOnly) { return $false }
-    if ($script:AceSafeSids -contains $Sid) { return $false }
-    $generic = [int64]0x50000000                       # GENERIC_ALL | GENERIC_WRITE
-    $replace = [int64](0x10000 + 0x40 + 0x40000 + 0x80000) + $generic   # Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership
-    $write   = [int64](0x2 + 0x4)                       # WriteData / AppendData
-    $mask = $replace
-    if ($Strict) { $mask = $replace + $write }
-    return (($Rights -band $mask) -ne 0)
-}
-
-function Get-PathWriteRisks {
-    # Walks the file, its folder and every parent folder up to the drive root. Returns a list of reasons (empty = safe).
-    param([string]$Path)
-    $risks = New-Object System.Collections.ArrayList
-    $cur = $Path
-    $level = 0
-    $guard = 0
-    while ($cur -and $guard -lt 40) {
-        $guard++
-        if (Test-Path -LiteralPath $cur) {
-            try {
-                $acl = Get-Acl -LiteralPath $cur -ErrorAction Stop
-                $strict = ($level -le 1)
-                foreach ($ace in @($acl.Access)) {
-                    $sid = ''
-                    try { $sid = $ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { $sid = [string]$ace.IdentityReference.Value }
-                    $inh = (($ace.PropagationFlags.ToString()) -match 'InheritOnly')
-                    if ($level -eq 0) { $inh = $false }
-                    if (Test-AceUnsafe $sid ([int64][int]$ace.FileSystemRights) ([string]$ace.AccessControlType) $inh $strict) {
-                        [void]$risks.Add(($cur + ' is writable by ' + [string]$ace.IdentityReference.Value))
-                    }
-                }
-            } catch { [void]$risks.Add(($cur + ': permissions could not be read')) }
-        }
-        $parent = Split-Path -Path $cur -Parent
-        if (-not $parent -or $parent -eq $cur) { break }
-        $cur = $parent
-        $level++
-    }
-    return @($risks)
-}
-
-function Get-PythonCandidates {
-    $c = New-Object System.Collections.ArrayList
-    $py = Get-Command py -ErrorAction SilentlyContinue
-    if ($py) {
-        try {
-            $o = (& $py.Source -3 -c 'import sys; print(sys.executable)' 2>&1 | Out-String).Trim()
-            if ($o -and (Test-Path -LiteralPath $o -PathType Leaf)) { [void]$c.Add($o) }
-        } catch { }
-    }
-    foreach ($p in @(Get-Command python -All -ErrorAction SilentlyContinue)) { if ($p.Source) { [void]$c.Add($p.Source) } }
-    # machine-wide installs (winget --scope machine, python.org "all users") that this window's PATH may not know yet
-    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-        if ($root -and (Test-Path -LiteralPath $root)) {
-            Get-ChildItem -LiteralPath $root -Directory -Filter 'Python3*' -ErrorAction SilentlyContinue | ForEach-Object {
-                $e = Join-Path $_.FullName 'python.exe'
-                if (Test-Path -LiteralPath $e) { [void]$c.Add($e) }
-            }
-        }
-    }
-    return @($c | Select-Object -Unique)
-}
-
-function Find-Python {
-    # Returns the FULL path of a working Python 3 ('' if none). A machine-wide (admin-only) one is preferred.
-    # The Microsoft Store "python" stub does not count as Python.
-    $working = New-Object System.Collections.ArrayList
-    foreach ($p in (Get-PythonCandidates)) {
-        if (Test-PythonWorks $p @('--version')) { [void]$working.Add($p) }
-    }
-    foreach ($p in $working) { if ((Get-PathWriteRisks $p).Count -eq 0) { return $p } }
-    if ($working.Count -gt 0) { return [string]$working[0] }
-    return ''
 }
 
 # ---------------- small file helpers ----------------
@@ -195,31 +100,14 @@ function Install-Controller {
     $name = [string]$Cfg.Controller.ProfileName
     $profile = Join-Path $profDir ($name + '.xml')
 
-    Write-Say '[2/7] Python' 'Cyan'
-    $py = Find-Python
-    $risks = @()
-    if ($py) { $risks = @(Get-PathWriteRisks $py) }
-    $needInstall = (-not $py) -or ($risks.Count -gt 0 -and -not $Cfg.Controller.AllowUserWritablePython)
-    if ($needInstall -and -not $script:Silent -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-        if ($py) { Write-Say ('  the Python found (' + $py + ') can be edited by normal users, which is not safe for a task that runs as administrator') 'Yellow' }
-        $a = Read-Host '  Install a machine-wide Python 3 (admin-only folder) with winget now? (y/n)'
-        if ($a -match '^(y|yes)$') {
-            & winget.exe install -e --id Python.Python.3.12 --scope machine --accept-package-agreements --accept-source-agreements
-            $py = Find-Python
-            if ($py) { $risks = @(Get-PathWriteRisks $py) }
-            if (-not $py) { $res.Message = 'Python was installed but could not be found. Close this window, open it again and re-run.'; return $res }
-        }
+    Write-Say '[2/7] Optimizer program' 'Cyan'
+    $ctl = Join-Path $SourceDir 'controller'
+    $exeSrc = Join-Path $ctl $script:CtlExeName
+    if (-not (Test-Path -LiteralPath $exeSrc)) {
+        $res.Message = ($script:CtlExeName + ' is missing from the controller folder. Download the "Kpekpes-full-package" (or the exe) from the build-exe run on GitHub Actions and put the exe in ' + $ctl + ' , then run again.')
+        return $res
     }
-    if (-not $py) { $res.Message = 'Python 3 is required for the controller optimizer. Install it for all users (winget install -e --id Python.Python.3.12 --scope machine) and run again.'; return $res }
-    if ($risks.Count -gt 0) {
-        if ($Cfg.Controller.AllowUserWritablePython) {
-            Write-Say ('  WARNING: ' + $py + ' can be edited by normal users. Allowed because Controller.AllowUserWritablePython is true.') 'Yellow'
-        } else {
-            $res.Message = ('The Python at ' + $py + ' can be edited by normal users (' + $risks[0] + '). The logon task runs as administrator, so it will not use it. Install a machine-wide Python: winget install -e --id Python.Python.3.12 --scope machine , then run again. (Or set Controller.AllowUserWritablePython to true in config.json if you accept that risk.)')
-            return $res
-        }
-    }
-    Write-Say ('  Python OK (' + $py + ')') 'Green'
+    Write-Say ('  found: ' + $exeSrc + '  (SHA-256 ' + (Get-FileSha256 $exeSrc) + ')') 'Green'
 
     if ($script:WhatIfMode) { Write-Say '  [what-if] would install the controller module now' 'Yellow'; $res.Ok = $true; return $res }
 
@@ -229,16 +117,15 @@ function Install-Controller {
     foreach ($p in @($d.Base, $d.Bin, $d.Backup)) { if (-not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p -Force | Out-Null } }
     [void](Add-KEntry ('dir|' + $d.Bin) @{ Type = 'dir'; Path = $d.Bin })
 
-    $ctl = Join-Path $SourceDir 'controller'
-    $pyDst = Join-Path $d.Bin 'ds4_optimize_final.py'
+    $exeDst = Join-Path $d.Bin $script:CtlExeName
     $batDst = Join-Path $d.Bin 'controller_optimizer.bat'
     $vbsDst = Join-Path $d.Bin 'run_hidden.vbs'
-    foreach ($f in @($pyDst, $batDst, $vbsDst)) { [void](Add-KEntry ('file|' + $f) @{ Type = 'file'; Path = $f }) }
-    Copy-Item -LiteralPath (Join-Path $ctl 'ds4_optimize_final.py') -Destination $pyDst -Force
+    foreach ($f in @($exeDst, $batDst, $vbsDst)) { [void](Add-KEntry ('file|' + $f) @{ Type = 'file'; Path = $f }) }
+    Copy-Item -LiteralPath $exeSrc -Destination $exeDst -Force
     $bat = (Get-Content -LiteralPath (Join-Path $ctl 'controller_optimizer.bat.template') -Raw -Encoding UTF8)
     $keepAwake = [string]$Cfg.Controller.KeepAwake
     $tunedPolicy = [string]$Cfg.Controller.TunedProfilePolicy
-    $bat = $bat.Replace('@@PROFILE@@', $profile).Replace('@@DS4EXE@@', $exe).Replace('@@STRAFE@@', $strafe).Replace('@@PYTHON@@', $py).Replace('@@KEEPAWAKE@@', $keepAwake).Replace('@@TUNEDPOLICY@@', $tunedPolicy)
+    $bat = $bat.Replace('@@PROFILE@@', $profile).Replace('@@DS4EXE@@', $exe).Replace('@@STRAFE@@', $strafe).Replace('@@OPTEXE@@', $exeDst).Replace('@@KEEPAWAKE@@', $keepAwake).Replace('@@TUNEDPOLICY@@', $tunedPolicy)
     $bat = ($bat -replace "`r?`n", "`r`n")
     [IO.File]::WriteAllText($batDst, $bat, (New-Object Text.UTF8Encoding($false)))
     $vbs = (Get-Content -LiteralPath (Join-Path $ctl 'run_hidden.vbs.template') -Raw -Encoding UTF8).Replace('@@BAT@@', $batDst)
@@ -296,7 +183,7 @@ function Install-Controller {
     }
 
     Write-Say '[7/7] Start it now' 'Cyan'
-    [void](Add-KEntry 'proc|controller' @{ Type = 'proc'; Pattern = '*ds4_optimize_final.py*' })
+    [void](Add-KEntry 'proc|controller' @{ Type = 'proc'; Pattern = ('*' + $script:CtlExeName + '*') })
     Start-Process -FilePath 'wscript.exe' -ArgumentList ('"' + $vbsDst + '"')
     $log = Join-Path $d.Bin 'ds4_optimizer.log'
     $deadline = (Get-Date).AddSeconds(25)
@@ -328,10 +215,9 @@ function Get-ControllerVerifyResults {
     else { [void]$r.Add((New-KResult 'Undo information saved' 'FAIL' 'not installed yet' $g)) }
 
     if ($exe) { [void]$r.Add((New-KResult 'DS4Windows found' 'PASS' $exe $g)) } else { [void]$r.Add((New-KResult 'DS4Windows found' 'FAIL' '' $g)) }
-    if (Find-Python) { [void]$r.Add((New-KResult 'Python 3 available' 'PASS' '' $g)) } else { [void]$r.Add((New-KResult 'Python 3 available' 'FAIL' 'install Python 3' $g)) }
 
     $vbs = Join-Path $d.Bin 'run_hidden.vbs'
-    foreach ($f in @('ds4_optimize_final.py', 'controller_optimizer.bat', 'run_hidden.vbs')) {
+    foreach ($f in @($script:CtlExeName, 'controller_optimizer.bat', 'run_hidden.vbs')) {
         if (Test-Path -LiteralPath (Join-Path $d.Bin $f)) { [void]$r.Add((New-KResult ('Installed: ' + $f) 'PASS' '' $g)) } else { [void]$r.Add((New-KResult ('Installed: ' + $f) 'FAIL' '' $g)) }
     }
     # the folder the scheduled task runs from must not be writable by normal users
@@ -378,7 +264,10 @@ function Get-ControllerVerifyResults {
         else { [void]$r.Add((New-KResult 'Logon task runs elevated' 'FAIL' '' $g)) }
     } else { [void]$r.Add((New-KResult 'Logon task registered' 'FAIL' '' $g)) }
 
-    $run = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like '*ds4_optimize_final.py*' -and $_.ProcessId -ne $PID })
+    # a single-file program shows up as two processes with the same name (launcher + the program itself): count the top one only
+    $all = @(Get-CimInstance Win32_Process -Filter ("Name='" + $script:CtlExeName + "'") -ErrorAction SilentlyContinue)
+    $ids = @($all | ForEach-Object { $_.ProcessId })
+    $run = @($all | Where-Object { $ids -notcontains $_.ParentProcessId })
     if ($run.Count -eq 1) { [void]$r.Add((New-KResult 'Optimizer running (exactly one)' 'PASS' '' $g)) }
     elseif ($run.Count -eq 0) { [void]$r.Add((New-KResult 'Optimizer running (exactly one)' 'FAIL' 'not running' $g)) }
     else { [void]$r.Add((New-KResult 'Optimizer running (exactly one)' 'WARN' ([string]$run.Count + ' copies running') $g)) }

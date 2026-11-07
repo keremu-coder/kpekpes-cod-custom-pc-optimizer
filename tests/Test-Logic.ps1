@@ -78,7 +78,7 @@ $c = Get-KConfig
 Assert-That 'overridden switch is read' ($c.DefenderExclusions -eq $false)
 Assert-That 'missing switches keep defaults' ($c.LogonReapply -eq $true -and $c.DisableServices -eq $true)
 Assert-That 'risky switches are OFF by default' ($c.HvciOff -eq $false -and $c.DisableToastNotifications -eq $false -and $c.UsePlatformTick -eq $false -and $c.ReapplyUserPreferences -eq $false)
-Assert-That 'controller safe defaults' ($c.Controller.KeepAwake -eq 'games' -and $c.Controller.TunedProfilePolicy -eq 'preserve-edits' -and $c.Controller.AllowUserWritablePython -eq $false)
+Assert-That 'controller safe defaults' ($c.Controller.KeepAwake -eq 'games' -and $c.Controller.TunedProfilePolicy -eq 'preserve-edits')
 Set-Content -LiteralPath $script:ConfigPath -Value '{ "Controller": { "KeepAwake": "bogus", "TunedProfilePolicy": "nope" } }' -Encoding UTF8
 $cb = Get-KConfig
 Assert-That 'invalid choice values fall back to safe defaults' ($cb.Controller.KeepAwake -eq 'games' -and $cb.Controller.TunedProfilePolicy -eq 'preserve-edits')
@@ -136,7 +136,7 @@ $restored = [IO.File]::ReadAllBytes($prof)
 Assert-That 'file is byte-identical after set + restore' (([BitConverter]::ToString($orig)) -eq ([BitConverter]::ToString($restored)))
 Assert-That 'missing tag returns false (no crash)' (-not (Set-XmlTagText $prof 'NoSuchTag' 'x'))
 
-Write-Host 'Bundled profile and tuned copy (never runs the endless optimizer loop)'
+Write-Host 'Bundled profile and tuned copy (tests the optimizer source module; Python exists on the CI runner only, the built exe is smoke-tested in build-exe.yml)'
 $py = $null
 foreach ($n in @('python3', 'python')) { if (-not $py -and (Get-Command $n -ErrorAction SilentlyContinue)) { $py = $n } }
 # Runs a python helper with a hard time limit. Returns @{ ExitCode; Output; TimedOut }.
@@ -231,11 +231,15 @@ Assert-That 'edited file is kept, not deleted' ((Restore-OwnedFileEntry $oe) -eq
 
 Write-Host 'Launcher templates'
 $bat = Get-Content -LiteralPath (Join-Path $repo 'controller\controller_optimizer.bat.template') -Raw
-foreach ($tok in @('@@PROFILE@@', '@@DS4EXE@@', '@@STRAFE@@', '@@PYTHON@@', '@@KEEPAWAKE@@', '@@TUNEDPOLICY@@')) { Assert-That ('bat template has ' + $tok) ($bat.Contains($tok)) }
-$gen = $bat.Replace('@@PROFILE@@', 'C:\p\EUPHO.xml').Replace('@@DS4EXE@@', 'C:\d\DS4Windows.exe').Replace('@@STRAFE@@', 'max').Replace('@@PYTHON@@', 'C:\Program Files\Python312\python.exe').Replace('@@KEEPAWAKE@@', 'games').Replace('@@TUNEDPOLICY@@', 'preserve-edits')
+foreach ($tok in @('@@PROFILE@@', '@@DS4EXE@@', '@@STRAFE@@', '@@OPTEXE@@', '@@KEEPAWAKE@@', '@@TUNEDPOLICY@@')) { Assert-That ('bat template has ' + $tok) ($bat.Contains($tok)) }
+$gen = $bat.Replace('@@PROFILE@@', 'C:\p\EUPHO.xml').Replace('@@DS4EXE@@', 'C:\d\DS4Windows.exe').Replace('@@STRAFE@@', 'max').Replace('@@OPTEXE@@', 'C:\ProgramData\KpekpesCODCustom\controller\bin\KpekpesPCOptimizer.exe').Replace('@@KEEPAWAKE@@', 'games').Replace('@@TUNEDPOLICY@@', 'preserve-edits')
 Assert-That 'no placeholder left after generation' (-not $gen.Contains('@@'))
-Assert-That 'bat keeps the duplicate-run guard' ($gen -match 'ds4_optimize_final\.py')
-Assert-That 'bat uses the full interpreter path, not PATH lookup' ($gen -match '"C:\\Program Files\\Python312\\python\.exe" -u' -and -not ($gen -match '(?m)^\s*(python|py) '))
+Assert-That 'bat keeps the duplicate-run guard' ($gen -match "Name -eq 'KpekpesPCOptimizer\.exe'")
+Assert-That 'bat starts the program by its full path, not PATH lookup' ($gen -match '(?m)^"C:\\ProgramData\\KpekpesCODCustom\\controller\\bin\\KpekpesPCOptimizer\.exe" --profile' -and -not ($gen -match '(?i)python'))
+Assert-That 'bat sends the unpack folder to the protected folder' ($gen -match 'set "TEMP=%~dp0tmp"' -and $gen -match 'set "TMP=%~dp0tmp"')
+$vi = Get-Content -LiteralPath (Join-Path $repo 'controller\version_info.txt') -Raw
+$missing = @('CompanyName','FileDescription','FileVersion','LegalCopyright','ProductName','ProductVersion','OriginalFilename') | Where-Object { $vi -notmatch ("StringStruct\('" + $_ + "', '[^']+'\)") }
+Assert-That 'version resource file has every field' (@($missing).Count -eq 0) ($missing -join ', ')
 Assert-That 'bat passes the keep-awake and tuned-policy flags' ($gen -match '--keep-awake games' -and $gen -match '--tuned-policy preserve-edits')
 Assert-That 'no personal path in the template' (-not ($bat -match 'kerem'))
 Assert-That 'vbs template has a placeholder' ((Get-Content -LiteralPath (Join-Path $repo 'controller\run_hidden.vbs.template') -Raw).Contains('@@BAT@@'))
@@ -261,19 +265,6 @@ $cfg3 = Get-KDefaultConfig; $cfg3.DisableToastNotifications = $true; $cfg3.HvciO
 $tw3 = Get-PcRegTweaks $cfg3
 Assert-That 'opt-in toast switch adds the tweak' (@($tw3 | Where-Object { $_.Name -eq 'ToastEnabled' }).Count -eq 1)
 Assert-That 'opt-in HvciOff switch adds the group' (@($tw3 | Where-Object { $_.Group -eq 'Memory integrity' }).Count -gt 0)
-
-Write-Host 'Python safety check (ACL rules)'
-$sys = 'S-1-5-18'; $adm = 'S-1-5-32-544'; $usr = 'S-1-5-32-545'; $auth = 'S-1-5-11'; $me = 'S-1-5-21-1-2-3-1001'
-Assert-That 'SYSTEM full control is safe' (-not (Test-AceUnsafe $sys 0x1F01FF 'Allow'))
-Assert-That 'Administrators full control is safe' (-not (Test-AceUnsafe $adm 0x1F01FF 'Allow'))
-Assert-That 'Users read+execute is safe' (-not (Test-AceUnsafe $usr 0x1200A9 'Allow'))
-Assert-That 'Users modify is UNSAFE' (Test-AceUnsafe $usr 0x1301BF 'Allow')
-Assert-That 'Authenticated Users write is UNSAFE' (Test-AceUnsafe $auth 0x2 'Allow')
-Assert-That 'the current user having full control is UNSAFE (per-user install)' (Test-AceUnsafe $me 0x1F01FF 'Allow')
-Assert-That 'a deny entry is not a risk' (-not (Test-AceUnsafe $usr 0x1301BF 'Deny'))
-Assert-That 'inherit-only entry does not apply to the folder itself' (-not (Test-AceUnsafe $usr 0x1301BF 'Allow' $true $true))
-Assert-That 'parent folder: plain create-folder right is not a risk' (-not (Test-AceUnsafe $auth 0x4 'Allow' $false $false))
-Assert-That 'parent folder: delete-children right IS a risk' (Test-AceUnsafe $usr 0x40 'Allow' $false $false)
 
 Write-Host 'Service restore: delayed flag + hibernate + shadow storage parsing'
 Assert-That 'service restore function handles the delayed flag' ((Get-Command Restore-ServiceEntry).ScriptBlock.ToString() -match 'DelayedAutostart')
