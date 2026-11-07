@@ -6,6 +6,9 @@
 # the optimizer twice, or letting the logon task re-apply it, can never turn the tweaked state into
 # the "original".
 
+$script:KGroup = $null                                   # current change group (tags new entries)
+$script:KDrift = New-Object System.Collections.ArrayList  # values changed by someone else since we wrote them
+
 function Open-KJournal {
     param([string]$Module)
     $dir  = Join-Path $script:DataRoot $Module
@@ -53,6 +56,9 @@ function Add-KEntry {
     if ($script:WhatIfMode -or $null -eq $script:J) { return $false }
     if ($script:J.Index.ContainsKey($Id)) { return $false }
     $e = [ordered]@{ Id = $Id; Time = (Get-Date).ToString('s') }
+    # Group tag (set by the caller around a block of changes) lets one group be undone on its own, which is
+    # what a per-group A/B test needs. Entries written without a group are only undone by a full Undo.
+    if ($script:KGroup -and -not $Data.ContainsKey('Group')) { $e['Group'] = [string]$script:KGroup }
     foreach ($k in $Data.Keys) { $e[$k] = $Data[$k] }
     [void]$script:J.Entries.Add([pscustomobject]$e)
     $script:J.Index[$Id] = $true
@@ -145,10 +151,12 @@ function Set-KReg {
         Register-NewKeys $Path
         $st = Get-RegRaw $Path $Name
         $saved = ConvertTo-JsonSafe $st.Raw $st.Kind
-        [void](Add-KEntry ('reg|' + $Path + '|' + $Name) @{ Type = 'reg'; Path = $Path; Name = $Name; Existed = $st.Existed; Kind = $st.Kind; Value = $saved })
-        if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
         $v = $Value
         if ($Kind -eq 'DWord') { $v = ConvertTo-RegInt $Value }
+        # Wrote/WroteKind = what this tool put there. Undo compares it with the live value to spot drift
+        # (you or Windows changed it afterwards) and reports it instead of silently overwriting your change.
+        [void](Add-KEntry ('reg|' + $Path + '|' + $Name) @{ Type = 'reg'; Path = $Path; Name = $Name; Existed = $st.Existed; Kind = $st.Kind; Value = $saved; Wrote = (ConvertTo-JsonSafe $v $Kind); WroteKind = $Kind })
+        if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
         New-ItemProperty -LiteralPath $Path -Name $Name -PropertyType $Kind -Value $v -Force -ErrorAction Stop | Out-Null
         return $true
     } catch {
@@ -157,9 +165,25 @@ function Set-KReg {
     }
 }
 
+function Test-KRegDrift {
+    # True if the live value is no longer what this tool wrote (someone changed it after us).
+    param($e)
+    if (-not $e.PSObject.Properties['Wrote']) { return $false }   # journal from an older version
+    $now = Get-RegRaw $e.Path $e.Name
+    if (-not $now.Existed) { return $true }
+    $kind = [string]$e.WroteKind
+    $w = $e.Wrote
+    if ($kind -eq 'Binary') {
+        $hex = [string]$w
+        if ($hex) { $w = [byte[]]@($hex -split '-' | ForEach-Object { [Convert]::ToByte($_, 16) }) } else { $w = [byte[]]@() }
+    }
+    return (-not (Test-RegValueEquals $now.Raw $w $kind))
+}
+
 function Restore-RegEntry {
     param($e)
     try {
+        if (Test-KRegDrift $e) { [void]$script:KDrift.Add(($e.Path + '\' + $e.Name)) }
         if ($e.Existed) {
             $kind = [string]$e.Kind
             $v = $null
@@ -541,15 +565,18 @@ function Restore-SysProtEntry {
 # ======================= the undo engine =======================
 
 function Invoke-KRevert {
-    param([string]$Module)
+    # -Group: undo only the entries tagged with that group (per-group A/B testing). The rest stay journaled.
+    param([string]$Module, [string]$Group = '')
     $path = Join-Path (Join-Path $script:DataRoot $Module) 'journal.json'
-    $result = @{ Ok = $true; Total = 0; Restored = 0; Failed = @(); Manual = @() }
+    $result = @{ Ok = $true; Total = 0; Restored = 0; Failed = @(); Manual = @(); Drift = @() }
+    $script:KDrift = New-Object System.Collections.ArrayList
     if (-not (Test-Path -LiteralPath $path)) {
         Write-Say ('Nothing to undo for ' + $Module + ' (no journal found).') 'Yellow'
         return $result
     }
     Open-KJournal $Module
     $entries = @($script:J.Entries)
+    if ($Group) { $entries = @($entries | Where-Object { $_.PSObject.Properties['Group'] -and [string]$_.Group -eq $Group }) }
     [array]::Reverse($entries)
     $result.Total = $entries.Count
     $failed = New-Object System.Collections.ArrayList
@@ -609,8 +636,23 @@ function Invoke-KRevert {
     }
     $result.Failed = @($failed)
     $result.Manual = @($manual | Select-Object -Unique)
+    $result.Drift = @($script:KDrift)
     $result.Restored = $result.Total - $failed.Count
-    if ($failed.Count -eq 0) {
+    if ($Group) {
+        # partial undo: drop the restored entries, keep everything else (and the failed ones) for later
+        $done = @{}; foreach ($e in $entries) { if ($failed -notcontains [string]$e.Id) { $done[[string]$e.Id] = $true } }
+        $keep = New-Object System.Collections.ArrayList
+        foreach ($e in @($script:J.Entries)) { if (-not $done.ContainsKey([string]$e.Id)) { [void]$keep.Add($e) } }
+        $script:J.Entries = $keep
+        $script:J.Index = @{}; foreach ($e in $keep) { $script:J.Index[[string]$e.Id] = $true }
+        Save-KJournal
+        if ($failed.Count -gt 0) { $result.Ok = $false }
+        if ($keep.Count -eq 0) {
+            $arch = Join-Path (Split-Path -Path $path -Parent) 'reverted'
+            if (-not (Test-Path -LiteralPath $arch)) { New-Item -ItemType Directory -Path $arch -Force | Out-Null }
+            Move-Item -LiteralPath $path -Destination (Join-Path $arch ((Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')) -Force
+        }
+    } elseif ($failed.Count -eq 0) {
         $arch = Join-Path (Split-Path -Path $path -Parent) 'reverted'
         if (-not (Test-Path -LiteralPath $arch)) { New-Item -ItemType Directory -Path $arch -Force | Out-Null }
         Move-Item -LiteralPath $path -Destination (Join-Path $arch ((Get-Date -Format 'yyyyMMdd-HHmmss') + '.json')) -Force

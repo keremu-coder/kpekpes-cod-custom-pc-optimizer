@@ -271,6 +271,8 @@ def main():
                     help="when to hold the PC/monitor awake (default: always, as before)")
     ap.add_argument("--tuned-policy", choices=["overwrite", "preserve-edits"], default="overwrite",
                     help="preserve-edits: never overwrite a _tuned.xml you changed (default: overwrite, as before)")
+    ap.add_argument("--write-only", action="store_true",
+                    help="write the _tuned.xml copy and exit (no timer, no priority loop) - used once at install")
     args = ap.parse_args()
 
     if args.profile:
@@ -279,6 +281,8 @@ def main():
             report(args.profile, root)
             if args.tune or args.strafe_boost:
                 write_tuned(args.profile, args)
+    if args.write_only:
+        return
 
     if not IS_WIN:
         print("\nSystem tweaks only work on Windows.")

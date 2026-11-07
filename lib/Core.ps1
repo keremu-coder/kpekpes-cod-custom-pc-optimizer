@@ -52,6 +52,7 @@ function Get-KDefaultConfig {
         RemoveXboxApps     = $true   # Game Bar / Xbox overlay apps
         DisableServices    = $true   # SysMain, DiagTrack, WSearch and friends
         HvciOff            = $false  # OPT-IN. Memory integrity / VBS / hypervisor off (lowers security, breaks WSL2/Hyper-V)
+        GameModeOff        = $false  # OPT-IN. Windows' Game Mode stays ON unless an A/B test on your PC says off is better (never off on dual-CCD X3D)
         LogonReapply       = $true   # re-apply the PC tweaks at every logon
         ReapplyUserPreferences = $false  # logon re-apply also resets mouse / visual / input choices (off = leaves them alone)
         DisableToastNotifications = $false  # OPT-IN. Can also hide Windows Security alerts
@@ -98,10 +99,15 @@ function Save-KConfig {
 # ---------------- protected folder ----------------
 # Scheduled tasks here run elevated, so the scripts they run must not be editable by normal users.
 function Protect-KDir {
+    # Ownership first: if a normal user created this folder before us, they would still OWN it, and an owner
+    # can always rewrite the permissions. So the folder (and everything in it) is handed to Administrators,
+    # then the permissions are replaced.
     param([string]$Path)
     try {
+        & icacls.exe $Path /setowner '*S-1-5-32-544' /T /C | Out-Null
+        $ownerOk = ($LASTEXITCODE -eq 0)
         & icacls.exe $Path /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
-        return ($LASTEXITCODE -eq 0)
+        return ($ownerOk -and $LASTEXITCODE -eq 0)
     } catch { return $false }
 }
 

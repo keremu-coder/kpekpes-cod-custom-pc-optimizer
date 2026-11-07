@@ -24,7 +24,8 @@ param(
     [switch]$WhatIf,
     [switch]$Detailed,
     [string]$Before,
-    [string]$After
+    [string]$After,
+    [string]$Group = ''   # Undo only this tweak group, e.g. -Group 'Scheduling' (for per-group A/B tests)
 )
 
 $ErrorActionPreference = 'Continue'
@@ -32,6 +33,9 @@ $root = $PSScriptRoot
 . (Join-Path $root 'lib\Core.ps1')
 . (Join-Path $root 'lib\Journal.ps1')
 . (Join-Path $root 'lib\Checks.ps1')
+. (Join-Path $root 'lib\Stats.ps1')
+. (Join-Path $root 'lib\Safety.ps1')
+. (Join-Path $root 'lib\Topology.ps1')
 . (Join-Path $root 'modules\Pc.ps1')
 . (Join-Path $root 'modules\Controller.ps1')
 
@@ -111,14 +115,28 @@ function Invoke-UndoAction {
         if ($a -notmatch '^(y|yes)$') { Write-Say 'Cancelled.' 'Yellow'; return }
     }
     if ($Which -eq 'Controller' -or $Which -eq 'Both') { try { [void](Invoke-ControllerUndo) } catch { Write-Say ('Controller undo error: ' + $_.Exception.Message) 'Red' } }
-    if ($Which -eq 'PC' -or $Which -eq 'Both') { try { [void](Invoke-PcUndo) } catch { Write-Say ('PC undo error: ' + $_.Exception.Message) 'Red' } }
+    if ($Which -eq 'PC' -or $Which -eq 'Both') { try { [void](Invoke-PcUndo -Group $Group) } catch { Write-Say ('PC undo error: ' + $_.Exception.Message) 'Red' } }
     Remove-KAppIfIdle
 }
 
 function Invoke-CompareAction {
     param([string]$B, [string]$A)
-    if (-not $B) { $B = (Read-Host 'Path to the BEFORE capture (CSV from PresentMon or CapFrameX)').Trim('"') }
-    if (-not $A) { $A = (Read-Host 'Path to the AFTER capture (CSV)').Trim('"') }
+    if (-not $B) { $B = (Read-Host 'BEFORE capture(s): one CSV, or several separated by commas (5+ recommended)').Trim('"') }
+    if (-not $A) { $A = (Read-Host 'AFTER capture(s): one CSV, or several separated by commas').Trim('"') }
+    $bl = @($B -split ',' | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ })
+    $al = @($A -split ',' | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ })
+    if ($bl.Count -ge 3 -and $al.Count -ge 3) {
+        try {
+            $s = Compare-FrameCaptureSets $bl $al
+            Write-Head ('Frame capture comparison: {0} runs before, {1} runs after (95 % intervals)' -f $s.BeforeRuns, $s.AfterRuns)
+            $s.Rows | Format-Table -AutoSize | Out-String | Write-Host
+            Write-Host '  "better" / "worse" only when the whole 95 % interval is on one side of zero.' -ForegroundColor DarkGray
+            Write-Host ('  Record runs in this order to cancel heat and background drift: ' + ((New-KAbbaSchedule 3) -join ' ')) -ForegroundColor DarkGray
+        } catch { Write-Host ('Compare failed: ' + $_.Exception.Message) -ForegroundColor Red }
+        return
+    }
+    Write-Host '  One capture per side cannot separate a real change from run-to-run noise. Treat the numbers below as a hint only.' -ForegroundColor Yellow
+    $B = $bl[0]; $A = $al[0]
     try {
         $c = Compare-FrameCaptures $B $A
         Write-Head 'Frame capture comparison'

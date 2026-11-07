@@ -125,7 +125,7 @@ function Install-Controller {
     $bat = (Get-Content -LiteralPath (Join-Path $ctl 'controller_optimizer.bat.template') -Raw -Encoding UTF8)
     $keepAwake = [string]$Cfg.Controller.KeepAwake
     $tunedPolicy = [string]$Cfg.Controller.TunedProfilePolicy
-    $bat = $bat.Replace('@@PROFILE@@', $profile).Replace('@@DS4EXE@@', $exe).Replace('@@STRAFE@@', $strafe).Replace('@@OPTEXE@@', $exeDst).Replace('@@KEEPAWAKE@@', $keepAwake).Replace('@@TUNEDPOLICY@@', $tunedPolicy)
+    $bat = $bat.Replace('@@PROFILE@@', $profile).Replace('@@OPTEXE@@', $exeDst).Replace('@@KEEPAWAKE@@', $keepAwake)
     $bat = ($bat -replace "`r?`n", "`r`n")
     [IO.File]::WriteAllText($batDst, $bat, (New-Object Text.UTF8Encoding($false)))
     $vbs = (Get-Content -LiteralPath (Join-Path $ctl 'run_hidden.vbs.template') -Raw -Encoding UTF8).Replace('@@BAT@@', $batDst)
@@ -169,8 +169,28 @@ function Install-Controller {
     } else {
         [void](Add-KEntry ('file|' + $tuned) @{ Type = 'file'; Path = $tuned })
     }
+    # Written ONCE here, while you watch, instead of by the elevated logon task every time: an elevated program
+    # writing into a folder a normal account controls (the DS4Windows profile folder) can be redirected.
+    # The exe's unpack folder points into the protected bin folder for the same reason.
+    $tmpDir = Join-Path $d.Bin 'tmp'
+    if (-not (Test-Path -LiteralPath $tmpDir)) { New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null }
+    $oldTemp = $env:TEMP; $oldTmp = $env:TMP
+    try {
+        $env:TEMP = $tmpDir; $env:TMP = $tmpDir
+        & $exeDst --profile $profile --strafe-boost $strafe --tuned-policy $tunedPolicy --write-only 2>&1 | ForEach-Object { Write-KLog ('tuned: ' + $_) }
+    } finally { $env:TEMP = $oldTemp; $env:TMP = $oldTmp }
 
-    Write-Say '[6/7] Start at every logon (hidden, elevated)' 'Cyan'
+    Write-Say '[6/7] Start at every logon (optimizer elevated, DS4Windows NOT elevated)' 'Cyan'
+    # DS4Windows usually lives in Downloads / Desktop, which any program running as you can change.
+    # So it gets its own task with NORMAL rights: replacing it gains an attacker nothing they did not already have.
+    $ds4Task = 'Kpekpes DS4Windows Start'
+    [void](Add-KEntry ('task|' + $ds4Task) @{ Type = 'task'; Name = $ds4Task })
+    $u0 = $env:USERDOMAIN + '\' + $env:USERNAME
+    $a0 = New-ScheduledTaskAction -Execute $exe
+    $tr0 = New-ScheduledTaskTrigger -AtLogOn -User $u0
+    $p0 = New-ScheduledTaskPrincipal -UserId $u0 -LogonType Interactive -RunLevel Limited
+    $s0 = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask -TaskName $ds4Task -Action $a0 -Trigger $tr0 -Principal $p0 -Settings $s0 -Force -ErrorAction Stop | Out-Null
     [void](Add-KEntry ('task|' + $script:CtlTask) @{ Type = 'task'; Name = $script:CtlTask })
     $u = $env:USERDOMAIN + '\' + $env:USERNAME
     $a = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"' + $vbsDst + '"')
@@ -185,6 +205,9 @@ function Install-Controller {
     Write-Say '[7/7] Start it now' 'Cyan'
     [void](Add-KEntry 'proc|controller' @{ Type = 'proc'; Pattern = ('*' + $script:CtlExeName + '*') })
     Start-Process -FilePath 'wscript.exe' -ArgumentList ('"' + $vbsDst + '"')
+    if (-not (Get-Process -Name 'DS4Windows' -ErrorAction SilentlyContinue)) {
+        try { Start-ScheduledTask -TaskName $ds4Task -ErrorAction Stop } catch { Write-KLog ('could not start DS4Windows: ' + $_.Exception.Message) 'WARN' }
+    }
     $log = Join-Path $d.Bin 'ds4_optimizer.log'
     $deadline = (Get-Date).AddSeconds(25)
     $boosted = $false

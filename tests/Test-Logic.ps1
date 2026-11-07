@@ -10,6 +10,9 @@ $env:ProgramData = $tmp
 . (Join-Path $repo 'lib\Core.ps1')
 . (Join-Path $repo 'lib\Journal.ps1')
 . (Join-Path $repo 'lib\Checks.ps1')
+. (Join-Path $repo 'lib\Stats.ps1')
+. (Join-Path $repo 'lib\Safety.ps1')
+. (Join-Path $repo 'lib\Topology.ps1')
 . (Join-Path $repo 'modules\Pc.ps1')
 . (Join-Path $repo 'modules\Controller.ps1')
 
@@ -122,6 +125,23 @@ $thrown = $false
 try { Import-FrameTimes (Join-Path $tmp 'nocol.csv') | Out-Null } catch { $thrown = $true }
 Assert-That 'file without a frame-time column is rejected' $thrown
 
+Write-Host 'Several captures per side, with intervals'
+$rng = New-Object System.Random 7
+$bf = @(); $af = @()
+for ($r = 0; $r -lt 5; $r++) {
+    $tb = New-Object 'System.Collections.Generic.List[double]'; $ta = New-Object 'System.Collections.Generic.List[double]'
+    for ($i = 0; $i -lt 600; $i++) { $tb.Add(10.0 + $rng.NextDouble() * 0.4); $ta.Add(8.0 + $rng.NextDouble() * 0.4) }
+    $pb = Join-Path $tmp ('b' + $r + '.csv'); New-Csv $pb $tb.ToArray(); $bf += $pb
+    $pa = Join-Path $tmp ('a' + $r + '.csv'); New-Csv $pa $ta.ToArray(); $af += $pa
+}
+$set = Compare-FrameCaptureSets $bf $af
+$avgRow = $set.Rows | Where-Object { $_.Metric -eq 'Average FPS' }
+Assert-That '5 vs 5 captures: a real 25 % gain is called better' ($avgRow.Verdict -eq 'better' -and $avgRow.ChangePct -gt 20) ($avgRow | Out-String)
+$aa = Compare-FrameCaptureSets $bf[0..2] $bf[2..4]
+Assert-That 'same config vs itself is never called better or worse' (@($aa.Rows | Where-Object { $_.Metric -eq 'Average FPS' -and $_.Verdict -match '^(better|worse)$' }).Count -eq 0) (($aa.Rows | Out-String))
+Set-Content -LiteralPath (Join-Path $tmp 'both.csv') -Value @('MsBetweenPresents,MsBetweenDisplayChange', '10,0', '10,20') -Encoding UTF8
+Assert-That 'displayed-frame column is preferred over present-to-present' ((Get-Command Import-FrameTimes).ScriptBlock.ToString() -match "@\('MsBetweenDisplayChange'")
+
 Write-Host 'DS4 profile edits touch only LaunchProgram'
 $prof = Join-Path $tmp 'EUPHO.xml'
 Copy-Item -LiteralPath (Join-Path $repo 'controller\profiles\EUPHO.xml') -Destination $prof
@@ -231,8 +251,15 @@ Assert-That 'edited file is kept, not deleted' ((Restore-OwnedFileEntry $oe) -eq
 
 Write-Host 'Launcher templates'
 $bat = Get-Content -LiteralPath (Join-Path $repo 'controller\controller_optimizer.bat.template') -Raw
-foreach ($tok in @('@@PROFILE@@', '@@DS4EXE@@', '@@STRAFE@@', '@@OPTEXE@@', '@@KEEPAWAKE@@', '@@TUNEDPOLICY@@')) { Assert-That ('bat template has ' + $tok) ($bat.Contains($tok)) }
-$gen = $bat.Replace('@@PROFILE@@', 'C:\p\EUPHO.xml').Replace('@@DS4EXE@@', 'C:\d\DS4Windows.exe').Replace('@@STRAFE@@', 'max').Replace('@@OPTEXE@@', 'C:\ProgramData\KpekpesCODCustom\controller\bin\KpekpesPCOptimizer.exe').Replace('@@KEEPAWAKE@@', 'games').Replace('@@TUNEDPOLICY@@', 'preserve-edits')
+foreach ($tok in @('@@PROFILE@@', '@@OPTEXE@@', '@@KEEPAWAKE@@')) { Assert-That ('bat template has ' + $tok) ($bat.Contains($tok)) }
+$gen = $bat.Replace('@@PROFILE@@', 'C:\p\EUPHO.xml').Replace('@@OPTEXE@@', 'C:\ProgramData\KpekpesCODCustom\controller\bin\KpekpesPCOptimizer.exe').Replace('@@KEEPAWAKE@@', 'games')
+# the bat runs elevated: it must never launch DS4Windows (user-writable) and never write a profile
+Assert-That 'elevated bat never starts DS4Windows' (-not ($bat -match '(?im)^\s*(start|call)\b.*DS4') -and -not $bat.Contains('@@DS4EXE@@'))
+Assert-That 'elevated bat never writes a profile (no --strafe-boost / --tuned-policy)' (-not ($bat -match '--strafe-boost|--tuned-policy|@@STRAFE@@|@@TUNEDPOLICY@@'))
+Assert-That 'no marketing claims in the launcher' (-not ($bat -match '(?i)aim assist|zero input delay|omnipotent'))
+$ctlSrc = (Get-Command Install-Controller).ScriptBlock.ToString()
+Assert-That 'DS4Windows gets its own NON-elevated logon task' ($ctlSrc -match "Kpekpes DS4Windows Start" -and $ctlSrc -match 'RunLevel Limited')
+Assert-That 'tuned profile is written once at install with --write-only' ($ctlSrc -match '--write-only')
 Assert-That 'no placeholder left after generation' (-not $gen.Contains('@@'))
 Assert-That 'bat keeps the duplicate-run guard' ($gen -match "Name -eq 'KpekpesPCOptimizer\.exe'")
 Assert-That 'bat starts the program by its full path, not PATH lookup' ($gen -match '(?m)^"C:\\ProgramData\\KpekpesCODCustom\\controller\\bin\\KpekpesPCOptimizer\.exe" --profile' -and -not ($gen -match '(?i)python'))
@@ -240,7 +267,7 @@ Assert-That 'bat sends the unpack folder to the protected folder' ($gen -match '
 $vi = Get-Content -LiteralPath (Join-Path $repo 'controller\version_info.txt') -Raw
 $missing = @('CompanyName','FileDescription','FileVersion','LegalCopyright','ProductName','ProductVersion','OriginalFilename') | Where-Object { $vi -notmatch ("StringStruct\('" + $_ + "', '[^']+'\)") }
 Assert-That 'version resource file has every field' (@($missing).Count -eq 0) ($missing -join ', ')
-Assert-That 'bat passes the keep-awake and tuned-policy flags' ($gen -match '--keep-awake games' -and $gen -match '--tuned-policy preserve-edits')
+Assert-That 'bat passes the keep-awake flag' ($gen -match '--keep-awake games')
 Assert-That 'no personal path in the template' (-not ($bat -match 'kerem'))
 Assert-That 'vbs template has a placeholder' ((Get-Content -LiteralPath (Join-Path $repo 'controller\run_hidden.vbs.template') -Raw).Contains('@@BAT@@'))
 
@@ -250,7 +277,13 @@ function Test-HasNvidia { return $true }
 $tw = Get-PcRegTweaks $cfg
 $keys = @($tw | ForEach-Object { $_.Path + '|' + $_.Name })
 Assert-That 'no duplicate registry targets' ((@($keys | Select-Object -Unique)).Count -eq $keys.Count)
-Assert-That 'Game Mode is set OFF (0)' ((@($tw | Where-Object { $_.Name -eq 'AutoGameModeEnabled' })[0].Value) -eq 0)
+Assert-That 'default: Game Mode is left alone (Windows default)' (-not (@($tw | Where-Object { $_.Name -eq 'AutoGameModeEnabled' }).Count -gt 0))
+$cfgGm = Get-KDefaultConfig; $cfgGm.GameModeOff = $true
+$script:CpuPolicyCache = Get-KCpuPolicy '13th Gen Intel(R) Core(TM) i7-13700K' 1
+Assert-That 'opt-in GameModeOff turns it off on a normal CPU' ((@(Get-PcRegTweaks $cfgGm | Where-Object { $_.Name -eq 'AutoGameModeEnabled' })[0].Value) -eq 0)
+$script:CpuPolicyCache = Get-KCpuPolicy 'AMD Ryzen 9 7950X3D 16-Core Processor' 2
+Assert-That 'opt-in GameModeOff is refused on a dual-CCD X3D' (-not (@(Get-PcRegTweaks $cfgGm | Where-Object { $_.Name -eq 'AutoGameModeEnabled' }).Count -gt 0))
+$script:CpuPolicyCache = $null
 Assert-That 'no write to the GPU driver class key' (-not (@($tw | Where-Object { $_.Path -match 'Control\\Class\\\{4d36e968' }).Count -gt 0))
 Assert-That 'no PowerMizer / PerfLevelSrc values' (-not (@($tw | Where-Object { $_.Name -match 'PowerMizer|PerfLevelSrc|DisableDynamicPstate' }).Count -gt 0))
 $cfg2 = Get-KDefaultConfig; $cfg2.WindowsUpdateBlock = $false; $cfg2.HvciOff = $false; $cfg2.GameProcessTweaks = $false
@@ -314,6 +347,30 @@ $threw = $false
 try { Open-KJournal 'corrupt' } catch { $threw = $true }
 Assert-That 'opening a damaged journal stops with an error' $threw
 Assert-That 'the damaged file is left untouched' ((Get-Content -LiteralPath (Join-Path $cd 'journal.json') -Raw).Trim() -eq '{ this is not json')
+
+Write-Host 'Per-group undo (what a per-group A/B test needs)'
+$gu = Join-Path $tmp 'groupundo'; New-Item -ItemType Directory -Path $gu -Force | Out-Null
+$ga = Join-Path $gu 'a.txt'; $gb = Join-Path $gu 'b.txt'; $gc = Join-Path $gu 'c.txt'
+foreach ($f in @($ga, $gb, $gc)) { Set-Content -LiteralPath $f -Value 'x' }
+Open-KJournal 'grouptest'
+$script:KGroup = 'Power & CPU'; [void](Add-KEntry 'file|a' @{ Type = 'file'; Path = $ga }); [void](Add-KEntry 'file|b' @{ Type = 'file'; Path = $gb })
+$script:KGroup = 'Network (registry)'; [void](Add-KEntry 'file|c' @{ Type = 'file'; Path = $gc })
+$script:KGroup = $null
+Assert-That 'entries carry their group tag' ((Get-KEntry 'file|a').Group -eq 'Power & CPU' -and (Get-KEntry 'file|c').Group -eq 'Network (registry)')
+$script:Quiet = $true
+$g1 = Invoke-KRevert 'grouptest' -Group 'Power & CPU'
+$script:Quiet = $false
+Assert-That 'only the chosen group is undone (2 of 2)' ($g1.Ok -and $g1.Restored -eq 2 -and $g1.Total -eq 2)
+Assert-That 'its files are gone, the other group is untouched' (-not (Test-Path -LiteralPath $ga) -and -not (Test-Path -LiteralPath $gb) -and (Test-Path -LiteralPath $gc))
+Open-KJournal 'grouptest'
+Assert-That 'journal keeps exactly the other group' (@($script:J.Entries).Count -eq 1 -and $null -ne (Get-KEntry 'file|c'))
+$script:Quiet = $true
+$g2 = Invoke-KRevert 'grouptest'
+$script:Quiet = $false
+Assert-That 'a later full undo finishes the rest' ($g2.Ok -and $g2.Restored -eq 1 -and -not (Test-Path -LiteralPath $gc))
+Assert-That 'reg entries record what was written (drift check)' ((Get-Command Set-KReg).ScriptBlock.ToString() -match 'Wrote = ' -and (Get-Command Restore-RegEntry).ScriptBlock.ToString() -match 'Test-KRegDrift')
+Assert-That 'Protect-KDir takes ownership before setting permissions' ((Get-Command Protect-KDir).ScriptBlock.ToString() -match "/setowner '\*S-1-5-32-544'")
+Assert-That 'Defender exclusions go through the elevation-safety check' ((Get-Command Get-PcDefenderWanted).ScriptBlock.ToString() -match 'Test-KPathSafeForElevation')
 
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''

@@ -132,8 +132,15 @@ function Get-PcRegTweaks {
     $g = 'Graphics & Game Mode'
     Add-RT $g 'Hardware GPU scheduling on' $gfx 'HwSchMode' 2
     Add-RT $g 'MPO disabled (OverlayTestMode = 5)' 'HKLM:\SOFTWARE\Microsoft\Windows\Dwm' 'OverlayTestMode' 5
-    Add-RT $g 'Game Mode off (AllowAutoGameMode)' $gameBar 'AllowAutoGameMode' 0
-    Add-RT $g 'Game Mode off (AutoGameModeEnabled)' $gameBar 'AutoGameModeEnabled' 0
+    if ($Cfg.GameModeOff) {
+        # opt-in, and never on dual-CCD X3D chips: AMD's V-Cache driver relies on Game Mode
+        $gmOk = $true
+        try { if (Get-Command Get-PcCpuPolicy -ErrorAction SilentlyContinue) { $gmOk = -not (Get-PcCpuPolicy).Kind.Equals('dual-ccd-x3d') } } catch { }
+        if ($gmOk) {
+            Add-RT $g 'Game Mode off (AllowAutoGameMode)' $gameBar 'AllowAutoGameMode' 0
+            Add-RT $g 'Game Mode off (AutoGameModeEnabled)' $gameBar 'AutoGameModeEnabled' 0
+        }
+    }
     Add-RT $g 'Game Bar controller button off' $gameBar 'UseNexusForGameBarEnabled' 0
     Add-RT $g 'Game Bar startup panel off' $gameBar 'ShowStartupPanel' 0
     Add-RT $g 'Game DVR off' $gcs 'GameDVR_Enabled' 0
@@ -257,7 +264,9 @@ function Invoke-PcRegTweaks {
     foreach ($t in (Get-PcRegTweaks $Cfg)) {
         # The logon re-apply leaves your own mouse / visual / input choices alone unless you switch it on.
         if ($Reapply -and -not $Cfg.ReapplyUserPreferences -and $t.Group -eq 'Visual effects & input') { continue }
+        $script:KGroup = $t.Group   # tags the journal entry, so one group can be undone on its own (A/B testing)
         $ok = Set-KReg $t.Path $t.Name $t.Value $t.Kind
+        $script:KGroup = $null
         if (-not $ok -and -not $t.BestEffort) { $fail++ }
     }
     return $fail
@@ -355,7 +364,9 @@ function Invoke-PcPower {
     if ($script:WhatIfMode) { Write-Say '  [what-if] would create the Kpekpes COD Custom Max power plan and make it active' 'Yellow'; return $true }
     $plan = Initialize-PcPowerPlan
     if (-not $plan) { Write-Say '  could not create the power plan' 'Red'; return $false }
-    $single = Get-IsSingleCcdAmd
+    $pol = Get-PcCpuPolicy   # exact CCD count from the L3 caches, X3D-aware (lib\Topology.ps1 + lib\Stats.ps1)
+    $single = -not $pol.DisableParking
+    if ($pol.Reason) { Write-Say ('  core parking left to Windows: ' + $pol.Reason) 'DarkGray' }
     $amd = Test-IsAmdCpu
     Set-PcPower $plan 'SUB_PROCESSOR' 'PROCTHROTTLEMIN' 100
     Set-PcPower $plan 'SUB_PROCESSOR' 'PROCTHROTTLEMAX' 100
@@ -471,6 +482,10 @@ function Invoke-PcGameProcess {
 function Get-XboxPatterns { return @('*Microsoft.XboxGamingOverlay*', '*Microsoft.XboxSpeechToTextOverlay*', '*Microsoft.XboxGameCallableUI*') }
 
 function Invoke-PcXbox {
+    if (-not (Get-PcCpuPolicy).RemoveGameBar) {
+        Write-Say ('  kept (' + (Get-PcCpuPolicy).Reason + ')') 'DarkGray'
+        return
+    }
     foreach ($pat in (Get-XboxPatterns)) {
         foreach ($pkg in @(Get-AppxPackage -AllUsers $pat -ErrorAction SilentlyContinue)) {
             [void](Add-KEntry ('appx|' + $pkg.Name) @{ Type = 'appx'; Name = $pkg.Name; Label = ('Reinstall "' + $pkg.Name + '" from the Microsoft Store (Windows cannot restore a removed app by itself)') })
@@ -531,7 +546,21 @@ function Get-PcDefenderWanted {
     $ds4 = ''
     if (Get-Command Find-DS4Windows -ErrorAction SilentlyContinue) { $ds4 = Find-DS4Windows }
     if ($ds4 -and (Test-Path -LiteralPath $ds4)) { [void]$procs.Add($ds4); [void]$paths.Add((Split-Path $ds4 -Parent)) }
-    return [pscustomobject]@{ Paths = @($paths | Select-Object -Unique); Procs = @($procs | Select-Object -Unique) }
+    # An exclusion tells Defender to never look there again, and the logon task re-adds it with admin rights.
+    # So only places a normal account cannot write to are accepted (lib\Safety.ps1). Everything else is
+    # reported as skipped -- that includes %LOCALAPPDATA%, Downloads, and Steam libraries whose folder users can write.
+    $okPaths = New-Object System.Collections.Generic.List[string]
+    $okProcs = New-Object System.Collections.Generic.List[string]
+    $skipped = New-Object System.Collections.Generic.List[string]
+    foreach ($p in @($paths | Select-Object -Unique)) {
+        $s = Test-KPathSafeForElevation $p
+        if ($s.Safe) { [void]$okPaths.Add($p) } else { [void]$skipped.Add($p + ' (' + $s.Reason + ')') }
+    }
+    foreach ($p in @($procs | Select-Object -Unique)) {
+        $s = Test-KPathSafeForElevation $p
+        if ($s.Safe) { [void]$okProcs.Add($p) } else { [void]$skipped.Add($p + ' (' + $s.Reason + ')') }
+    }
+    return [pscustomobject]@{ Paths = @($okPaths); Procs = @($okProcs); Skipped = @($skipped) }
 }
 
 function Invoke-PcDefender {
@@ -541,6 +570,7 @@ function Invoke-PcDefender {
         $havePath = @($mp.ExclusionPath)
         $haveProc = @($mp.ExclusionProcess)
         $w = Get-PcDefenderWanted
+        foreach ($sk in $w.Skipped) { Write-Say ('  not excluded (a normal account can change it): ' + $sk) 'DarkGray' }
         foreach ($p in $w.Paths) {
             if ($havePath -contains $p) { continue }
             [void](Add-KEntry ('defexcl|Path|' + $p) @{ Type = 'defexcl'; Kind = 'Path'; Value = $p })
@@ -603,12 +633,12 @@ function Get-PcVerifyResults {
             elseif ($v -eq $c[3]) { [void]$r.Add((New-KResult $c[0] 'PASS' '' 'Power & CPU')) }
             else { [void]$r.Add((New-KResult $c[0] 'FAIL' ('want ' + $c[3] + ', found ' + $v) 'Power & CPU')) }
         }
-        if (-not (Get-IsSingleCcdAmd)) {
+        if ((Get-PcCpuPolicy).DisableParking) {
             $v = Get-PcPowerIndex $plan 'SUB_PROCESSOR' 'CPMINCORES'
             if ($null -eq $v) { [void]$r.Add((New-KResult 'Core parking off' 'NA' 'hidden on this system' 'Power & CPU')) }
             elseif ($v -eq 100) { [void]$r.Add((New-KResult 'Core parking off' 'PASS' '' 'Power & CPU')) }
             else { [void]$r.Add((New-KResult 'Core parking off' 'FAIL' ('found ' + $v) 'Power & CPU')) }
-        } else { [void]$r.Add((New-KResult 'Core parking' 'NA' 'single-CCD Ryzen: Windows handles it' 'Power & CPU')) }
+        } else { [void]$r.Add((New-KResult 'Core parking' 'NA' ((Get-PcCpuPolicy).Reason) 'Power & CPU')) }
     }
     $hib = $null
     try { $hib = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -Name HibernateEnabled -ErrorAction Stop).HibernateEnabled } catch { }
@@ -704,7 +734,9 @@ public static extern int NtQueryTimerResolution(out uint MinimumResolution, out 
     else { [void]$r.Add((New-KResult 'TRIM enabled' 'FAIL' ('found ' + $tr) 'Disk')) }
 
     # Xbox apps
-    if ($Cfg.RemoveXboxApps) {
+    if ($Cfg.RemoveXboxApps -and -not (Get-PcCpuPolicy).RemoveGameBar) {
+        [void]$r.Add((New-KResult 'Xbox / Game Bar apps' 'NA' ('kept on purpose: ' + (Get-PcCpuPolicy).Reason) 'Xbox apps'))
+    } elseif ($Cfg.RemoveXboxApps) {
         foreach ($pat in (Get-XboxPatterns)) {
             $label = 'Removed: ' + ($pat -replace '\*', '')
             if (Get-AppxPackage -AllUsers $pat -ErrorAction SilentlyContinue) { [void]$r.Add((New-KResult $label 'FAIL' 'still installed' 'Xbox apps')) }
@@ -840,10 +872,15 @@ function Invoke-PcOptimize {
 }
 
 function Invoke-PcUndo {
-    Write-Head 'Undo PC optimizer'
-    $res = Invoke-KRevert 'pc'
+    param([string]$Group = '')
+    if ($Group) { Write-Head ('Undo PC optimizer - only the group "' + $Group + '"') } else { Write-Head 'Undo PC optimizer' }
+    $res = Invoke-KRevert 'pc' -Group $Group
     if ($res.Total -eq 0) { return $res }
     Write-Say ('  restored {0} of {1} recorded changes' -f $res.Restored, $res.Total) 'Green'
+    if ($res.Drift.Count -gt 0) {
+        Write-Say '  changed by you or Windows after the optimizer ran (your original value was put back anyway):' 'Yellow'
+        foreach ($d in $res.Drift) { Write-Say ('    ' + $d) 'Yellow' }
+    }
     if ($res.Failed.Count -gt 0) {
         Write-Say '  could not restore (journal kept so you can run Undo again):' 'Red'
         foreach ($f in $res.Failed) { Write-Say ('    ' + $f) 'Red' }

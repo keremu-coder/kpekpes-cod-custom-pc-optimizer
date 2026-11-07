@@ -17,7 +17,8 @@
 param(
     [ValidateSet('Safe', 'Full', 'Both')][string]$Scenario = 'Both',
     [switch]$Force,
-    [int]$StepTimeoutSec = 150
+    [int]$StepTimeoutSec = 150,
+    [int]$Seeds = 0   # extra "Safe" runs, each starting from a different RANDOM pre-existing state (property test)
 )
 
 $ErrorActionPreference = 'Continue'
@@ -30,6 +31,9 @@ if (($env:GITHUB_ACTIONS -ne 'true') -and -not $Force) {
 . (Join-Path $repo 'lib\Core.ps1')
 . (Join-Path $repo 'lib\Journal.ps1')
 . (Join-Path $repo 'lib\Checks.ps1')
+. (Join-Path $repo 'lib\Stats.ps1')
+. (Join-Path $repo 'lib\Safety.ps1')
+. (Join-Path $repo 'lib\Topology.ps1')
 . (Join-Path $repo 'modules\Pc.ps1')
 . (Join-Path $repo 'modules\Controller.ps1')
 $script:WhatIfMode = $false
@@ -210,8 +214,41 @@ function Get-JournalTypes {
 }
 
 # ---------------------------------------------------------------- one scenario
+function Set-RandomInitialState {
+    # The property under test: for ANY starting state S, Undo(Optimize(S)) == S.
+    # A clean runner only ever starts from one S (mostly "value absent"), so this seeds each target with one of:
+    #   absent | present with the tool's own type and a different value | present with a DIFFERENT type.
+    # HKLM targets only get absent / 0 / 1 so the runner stays usable; HKCU targets get the full range.
+    param($Cfg, [int]$Seed)
+    $rng = New-Object System.Random $Seed
+    $n = 0
+    foreach ($t in (Get-PcRegTweaks $Cfg)) {
+        if ($t.BestEffort) { continue }
+        $hkcu = $t.Path -like 'HKCU:*'
+        $pick = $rng.Next(3)
+        try {
+            if ($pick -eq 0) {
+                if (Test-Path -LiteralPath $t.Path) { Remove-ItemProperty -LiteralPath $t.Path -Name $t.Name -ErrorAction SilentlyContinue }
+            } else {
+                if (-not (Test-Path -LiteralPath $t.Path)) { New-Item -Path $t.Path -Force | Out-Null }
+                if ($pick -eq 1 -or -not $hkcu) {
+                    if ($t.Kind -eq 'DWord') { $v = $rng.Next(2); if ($hkcu) { $v = $rng.Next(1000) } ; New-ItemProperty -LiteralPath $t.Path -Name $t.Name -PropertyType DWord -Value $v -Force | Out-Null }
+                    elseif ($t.Kind -eq 'String') { New-ItemProperty -LiteralPath $t.Path -Name $t.Name -PropertyType String -Value ('kpk' + $rng.Next(1000)) -Force | Out-Null }
+                    elseif ($t.Kind -eq 'Binary') { $b = New-Object byte[] 8; $rng.NextBytes($b); New-ItemProperty -LiteralPath $t.Path -Name $t.Name -PropertyType Binary -Value $b -Force | Out-Null }
+                } else {
+                    # type mismatch: a DWORD target holding a string and vice versa
+                    if ($t.Kind -eq 'DWord') { New-ItemProperty -LiteralPath $t.Path -Name $t.Name -PropertyType String -Value ('kpk' + $rng.Next(1000)) -Force | Out-Null }
+                    else { New-ItemProperty -LiteralPath $t.Path -Name $t.Name -PropertyType DWord -Value $rng.Next(1000) -Force | Out-Null }
+                }
+            }
+            $n++
+        } catch { }
+    }
+    Add-Info ('seed ' + $Seed + ': randomized ' + $n + ' starting values')
+}
+
 function Invoke-Scenario {
-    param([string]$Name)
+    param([string]$Name, [int]$Seed = 0)
     Write-Host ''
     Write-Host ('=================== scenario: ' + $Name + ' ===================') -ForegroundColor White
     Reset-KpekpesData
@@ -221,7 +258,7 @@ function Invoke-Scenario {
     if ($Name -eq 'Safe') {
         $cfgMap = [ordered]@{ HvciOff = $false; RemoveXboxApps = $false; DefenderExclusions = $false; LogonReapply = $false }
     } else {
-        $cfgMap = [ordered]@{ HvciOff = $true; RemoveXboxApps = $true; DefenderExclusions = $true; LogonReapply = $true; DisableToastNotifications = $true; UsePlatformTick = $true; ReapplyUserPreferences = $false }
+        $cfgMap = [ordered]@{ HvciOff = $true; RemoveXboxApps = $true; DefenderExclusions = $true; LogonReapply = $true; DisableToastNotifications = $true; UsePlatformTick = $true; ReapplyUserPreferences = $false; GameModeOff = $true }
         # dummy game + Battle.net so the game-process, QoS and Defender code paths really run
         $cod = 'C:\Program Files (x86)\Call of Duty'
         $bn = 'C:\Program Files (x86)\Battle.net'
@@ -233,7 +270,8 @@ function Invoke-Scenario {
     $cfg = Get-KConfig
     # snapshot covers the union of every optional tweak so nothing is missed
     $snapCfg = Get-KDefaultConfig
-    foreach ($k in @('HvciOff', 'DisableToastNotifications', 'UsePlatformTick', 'ReapplyUserPreferences')) { $snapCfg[$k] = $true }
+    foreach ($k in @('HvciOff', 'DisableToastNotifications', 'UsePlatformTick', 'ReapplyUserPreferences', 'GameModeOff')) { $snapCfg[$k] = $true }
+    if ($Seed -gt 0) { Set-RandomInitialState $snapCfg $Seed }
 
     $before = Get-Snapshot $snapCfg
     Write-Host ('=== snapshot before: ' + $before.Count + ' items') -ForegroundColor Gray
@@ -304,6 +342,7 @@ function Invoke-Scenario {
 
 if ($Scenario -eq 'Safe' -or $Scenario -eq 'Both') { Invoke-Scenario 'Safe' }
 if ($Scenario -eq 'Full' -or $Scenario -eq 'Both') { Invoke-Scenario 'Full' }
+for ($s = 1; $s -le $Seeds; $s++) { Invoke-Scenario 'Safe' -Seed $s }
 
 Write-Host ''
 if ($script:Failures -eq 0) { Write-Host 'RESULT: 0 failed' -ForegroundColor Green; exit 0 }

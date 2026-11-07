@@ -85,7 +85,7 @@ jobs:
           $t = (Get-Content help.txt -Raw) + (Get-Content help.err -Raw)
           Write-Host $t
           $bad = 0
-          foreach ($f in @('--profile', '--strafe-boost', '--keep-awake', '--tuned-policy', 'always', 'games', 'never', 'overwrite', 'preserve-edits')) {
+          foreach ($f in @('--profile', '--strafe-boost', '--keep-awake', '--tuned-policy', '--write-only', 'always', 'games', 'never', 'overwrite', 'preserve-edits')) {
             if ($t -notmatch [regex]::Escape($f)) { $bad++; Write-Host ('FAIL missing in --help: ' + $f) }
           }
           if ($p.ExitCode -ne 0) { $bad++; Write-Host ('FAIL exit code ' + $p.ExitCode) }

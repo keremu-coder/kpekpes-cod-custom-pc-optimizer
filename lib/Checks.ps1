@@ -119,7 +119,9 @@ function Import-FrameTimes {
     if (-not $rows) { throw ('No rows in ' + $Path) }
     $cols = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
     $col = $null
-    foreach ($c in @('MsBetweenPresents', 'msBetweenPresents', 'MsBetweenDisplayChange', 'FrameTime', 'frametime', 'TimeInMs', 'MsInPresentAPI')) {
+    # Displayed-frame times first: that is what reaches your eyes. Present-to-present times count frames the
+    # display never showed (and miss the ones it showed late), so they are only the fallback.
+    foreach ($c in @('MsBetweenDisplayChange', 'DisplayedTime', 'MsBetweenPresents', 'msBetweenPresents', 'FrameTime', 'frametime', 'TimeInMs', 'MsInPresentAPI')) {
         if ($cols -contains $c) { $col = $c; break }
     }
     if (-not $col) { throw ('Cannot find a frame-time column in ' + $Path + '. Columns: ' + ($cols -join ', ')) }
@@ -132,6 +134,55 @@ function Import-FrameTimes {
     }
     if ($ft.Count -lt 100) { throw ('Too few frames in ' + $Path + ' (' + $ft.Count + '). Capture at least a minute of gameplay.') }
     return $ft.ToArray()
+}
+
+function Import-LatencyValues {
+    # Input-to-photon latency from PresentMon (needs Reflex markers or input events in the capture).
+    # Returns $null when the capture has no latency column -- latency is then simply not reported.
+    param([string]$Path)
+    $rows = Import-Csv -LiteralPath $Path
+    if (-not $rows) { return $null }
+    $cols = @($rows[0].PSObject.Properties | ForEach-Object { $_.Name })
+    foreach ($c in @('MsPCLatency', 'PCLatency', 'MsClickToPhotonLatency', 'ClickToPhotonLatency', 'MsAllInputToPhotonLatency', 'AllInputToPhotonLatency')) {
+        if ($cols -notcontains $c) { continue }
+        $v = New-Object System.Collections.Generic.List[double]
+        foreach ($row in $rows) {
+            $x = 0.0
+            if ([double]::TryParse([string]$row.$c, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$x)) { if ($x -gt 0) { $v.Add($x) } }
+        }
+        if ($v.Count -ge 20) { return [pscustomobject]@{ Column = $c; Values = $v.ToArray() } }
+    }
+    return $null
+}
+
+function Compare-FrameCaptureSets {
+    # Several captures per configuration (5+ each recommended, recorded in the order New-KAbbaSchedule gives).
+    # Every metric gets a 95 % interval and a verdict; "not enough data" is a real answer, not a failure.
+    param([string[]]$Before, [string[]]$After)
+    $metrics = @(
+        @('Average FPS', 'AvgFps', $true),
+        @('1% low FPS (average of slowest 1%)', 'Low1AvgFps', $true),
+        @('1% low FPS (time-weighted)', 'TimeLow1Fps', $true),
+        @('Frame-to-frame jitter (ms)', 'JitterMeanMs', $false),
+        @('Time spent in stutters (%)', 'StutterTimePct', $false)
+    )
+    $bs = @(); foreach ($p in $Before) { $bs += Get-FrameStatsV2 (Import-FrameTimes $p) }
+    $as = @(); foreach ($p in $After) { $as += Get-FrameStatsV2 (Import-FrameTimes $p) }
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($m in $metrics) {
+        $bv = [double[]]@($bs | ForEach-Object { $_.($m[1]) }); $av = [double[]]@($as | ForEach-Object { $_.($m[1]) })
+        $allZero = (@($bv + $av | Where-Object { $_ -ne 0 }).Count -eq 0)
+        if ($allZero) { [void]$rows.Add([pscustomobject]@{ Metric = $m[0]; Before = 0; After = 0; ChangePct = 0; CI95 = 'n/a'; Verdict = 'none in any capture' }); continue }
+        $c = Compare-KRunSets $bv $av -HigherIsBetter $m[2]
+        [void]$rows.Add([pscustomobject]@{ Metric = $m[0]; Before = $c.BeforeMean; After = $c.AfterMean; ChangePct = $c.ChangePct; CI95 = ('{0} .. {1} %' -f $c.CiLowPct, $c.CiHighPct); Verdict = $c.Verdict })
+    }
+    $bl = @(); foreach ($p in $Before) { $l = Import-LatencyValues $p; if ($l) { $bl += (Get-KMeanVar $l.Values).Mean } }
+    $al = @(); foreach ($p in $After) { $l = Import-LatencyValues $p; if ($l) { $al += (Get-KMeanVar $l.Values).Mean } }
+    if ($bl.Count -ge 3 -and $al.Count -ge 3) {
+        $c = Compare-KRunSets ([double[]]$bl) ([double[]]$al) -HigherIsBetter $false
+        [void]$rows.Add([pscustomobject]@{ Metric = 'Input-to-photon latency (ms)'; Before = $c.BeforeMean; After = $c.AfterMean; ChangePct = $c.ChangePct; CI95 = ('{0} .. {1} %' -f $c.CiLowPct, $c.CiHighPct); Verdict = $c.Verdict })
+    }
+    return [pscustomobject]@{ Rows = @($rows); BeforeRuns = $bs.Count; AfterRuns = $as.Count }
 }
 
 function Get-FrameStats {

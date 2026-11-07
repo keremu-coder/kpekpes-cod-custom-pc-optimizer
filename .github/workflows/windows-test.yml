@@ -47,7 +47,12 @@ jobs:
         working-directory: ${{ env.KROOT }}
         run: .\tests\Test-Logic.ps1
 
-      - name: 3. Round trip on this machine (Safe + Full), then compare
-        timeout-minutes: 8
+      - name: 2b. Measurement maths tests (frame stats, intervals, latency model, stick model)
+        timeout-minutes: 5
         working-directory: ${{ env.KROOT }}
-        run: .\tests\Test-Roundtrip.ps1 -Scenario Both
+        run: .\tests\Test-Stats.ps1
+
+      - name: 3. Round trip on this machine (Safe + Full + 3 random starting states), then compare
+        timeout-minutes: 15
+        working-directory: ${{ env.KROOT }}
+        run: .\tests\Test-Roundtrip.ps1 -Scenario Both -Seeds 3
