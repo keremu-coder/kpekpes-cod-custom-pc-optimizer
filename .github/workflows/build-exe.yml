@@ -48,7 +48,7 @@ jobs:
             --name KpekpesPCOptimizer `
             --version-file controller\version_info.txt `
             --icon assets\icon.ico `
-            --distpath dist --workpath build --specpath build `
+            --distpath dist --workpath build `
             controller\ds4_optimize_final.py
           if (-not (Test-Path dist\KpekpesPCOptimizer.exe)) { Write-Host 'build produced no exe'; exit 1 }
 
@@ -92,7 +92,7 @@ jobs:
           Write-Host ('SHA-256 ' + $h)
           # the whole tool with the exe already in controller\, ready to unzip and run
           New-Item -ItemType Directory -Path pkg\Kpekpes | Out-Null
-          Get-ChildItem -Force | Where-Object { $_.Name -notin @('.git', '.github', 'dist', 'build', 'pkg') -and $_.Extension -ne '.zip' } | Copy-Item -Destination pkg\Kpekpes -Recurse -Force
+          Get-ChildItem -Force | Where-Object { $_.Name -notin @('.git', '.github', 'dist', 'build', 'pkg', 'KpekpesPCOptimizer.spec') -and $_.Extension -ne '.zip' } | Copy-Item -Destination pkg\Kpekpes -Recurse -Force
           Copy-Item dist\KpekpesPCOptimizer.exe pkg\Kpekpes\controller\ -Force
           Compress-Archive -Path pkg\Kpekpes -DestinationPath dist\Kpekpes-ready-to-run.zip -Force
 
