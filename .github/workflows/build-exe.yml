@@ -59,8 +59,8 @@ jobs:
             CompanyName      = 'Jesus Kpekpes'
             FileDescription  = 'Controller input optimizer'
             ProductName      = 'Kpekpes PC Optimizer'
-            FileVersion      = '1.2.0.0'
-            ProductVersion   = '1.2.0.0'
+            FileVersion      = '1.2.1.0'
+            ProductVersion   = '1.2.1.0'
             OriginalFilename = 'KpekpesPCOptimizer.exe'
           }
           $bad = 0
